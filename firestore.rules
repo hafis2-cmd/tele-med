@@ -1,0 +1,489 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global deny by default
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: users
+    // Document ID: {userId} (Firebase Auth UID)
+    // Fields:
+    //   - email: string (required)
+    //   - role: string (required, ['Patient', 'Doctor', 'Admin'])
+    //   - name: string (optional)
+    //   - age: number (optional)
+    //   - gender: string (optional, ['Male', 'Female', 'Other'])
+    //   - bloodGroup: string (optional)
+    //   - allergies: string (optional)
+    //   - medicalHistory: string (optional)
+    //   - subscribed: bool (optional)
+    //   - createdAt: timestamp (required)
+    //
+    // Collection: diagnoses
+    // Document ID: {diagnosisId}
+    // Fields:
+    //   - patientEmail: string (required)
+    //   - condition: string (required)
+    //   - risk: number (required)
+    //   - explanation: string (required)
+    //   - timestamp: timestamp (required)
+    //
+    // Collection: appointments
+    // Document ID: {appointmentId}
+    // Fields:
+    //   - patientEmail: string (required)
+    //   - doctorName: string (required)
+    //   - doctorSpecialty: string (optional)
+    //   - doctorImage: string (optional)
+    //   - location: string (optional)
+    //   - date: string (required)
+    //   - time: string (required)
+    //   - status: string (required, ['booked', 'completed', 'cancelled'])
+    //   - timestamp: timestamp (required)
+    //
+    // Collection: calls
+    // Document ID: {callId}
+    // Fields:
+    //   - offer: map (optional)
+    //   - answer: map (optional)
+    //   - callerEmail: string (required)
+    //   - receiverEmail: string (required)
+    //   - status: string (required, ['calling', 'active', 'ended'])
+    //   - timestamp: timestamp (required)
+    // Collection: prescriptions
+    // Document ID: {prescriptionId}
+    // Fields:
+    //   - patientEmail: string (required)
+    //   - patientName: string (optional)
+    //   - doctorName: string (required)
+    //   - doctorEmail: string (optional)
+    //   - date: string (required)
+    //   - medications: list (required)
+    //   - notes: string (optional)
+    //   - timestamp: timestamp (required)
+    //
+    // Collection: payments
+    // Document ID: {paymentId}
+    // Fields:
+    //   - patientEmail: string (required)
+    //   - patientName: string (optional)
+    //   - amount: number (required)
+    //   - currency: string (optional)
+    //   - status: string (required, ['pending', 'completed', 'failed'])
+    //   - description: string (required)
+    //   - method: string (optional)
+    //   - timestamp: timestamp (required)
+    //
+    // Collection: subscriptions
+    // Document ID: {subscriptionId}
+    // Fields:
+    //   - userEmail: string (required)
+    //   - plan: string (required, ['monthly', 'yearly'])
+    //   - status: string (required, ['active', 'expired', 'cancelled'])
+    //   - amount: number (required)
+    //   - startDate: timestamp (optional)
+    //   - endDate: timestamp (optional)
+    //   - timestamp: timestamp (required)
+    //
+    // Collection: slots
+    // Document ID: {slotId}
+    // Fields:
+    //   - doctorEmail: string (required)
+    //   - doctorName: string (required)
+    //   - date: string (required)
+    //   - time: string (required)
+    //   - isAvailable: bool (required)
+    //   - timestamp: timestamp (required)
+    //
+    // ===============================================================
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() &&
+        ((request.auth.token.email == "hafismohammed174@gmail.com") ||
+         (request.auth.token.email == "cea23csb004@ceattingal.ac.in") ||
+         (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
+          get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'Admin'));
+    }
+
+    function isDoctor() {
+      return isAuthenticated() && 
+        exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
+        (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'Doctor' ||
+         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'Admin');
+    }
+
+    function hasRequiredFields(fields) {
+      return request.resource.data.keys().hasAll(fields);
+    }
+
+    function hasOnlyAllowedFields(fields) {
+      return request.resource.data.keys().hasOnly(fields);
+    }
+
+    function profileEmail() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data.email;
+    }
+
+    // ===============================================================
+    // Domain Validators
+    // ===============================================================
+
+    function isValidUser(data) {
+      return hasOnlyAllowedFields(['email', 'role', 'subscribed', 'createdAt', 'updatedAt', 'name', 'age', 'gender', 'bloodGroup', 'allergies', 'medicalHistory', 'specialty', 'bio', 'location', 'experience', 'newsletter', 'photoURL', 'image', 'isOnline', 'lastSeen', 'typingTo']) &&
+             (!('email' in data) || (data.email is string && data.email.size() < 256)) &&
+             (!('role' in data) || data.role in ['Patient', 'Doctor', 'Admin']) &&
+             (!('subscribed' in data) || data.subscribed is bool) &&
+             (!('createdAt' in data) || data.createdAt is timestamp) &&
+             (!('updatedAt' in data) || data.updatedAt is timestamp) &&
+             (!('name' in data) || data.name == null || (data.name is string && data.name.size() < 256)) &&
+             (!('age' in data) || data.age == null || (data.age is number && data.age >= 0 && data.age < 150)) &&
+             (!('gender' in data) || data.gender == null || data.gender == "" || data.gender in ['Male', 'Female', 'Other']) &&
+             (!('bloodGroup' in data) || (data.bloodGroup is string && data.bloodGroup.size() < 20)) &&
+             (!('allergies' in data) || (data.allergies is string && data.allergies.size() < 2000)) &&
+             (!('medicalHistory' in data) || (data.medicalHistory is string && data.medicalHistory.size() < 10000)) &&
+             (!('specialty' in data) || (data.specialty is string && data.specialty.size() < 256)) &&
+             (!('bio' in data) || (data.bio is string && data.bio.size() < 5000)) &&
+             (!('location' in data) || (data.location is string && data.location.size() < 512)) &&
+             (!('experience' in data) || data.experience == null || (data.experience is number && data.experience >= 0)) &&
+             (!('newsletter' in data) || data.newsletter is bool) &&
+             (!('photoURL' in data) || data.photoURL == null || (data.photoURL is string && data.photoURL.size() < 1000)) &&
+             (!('image' in data) || data.image == null || (data.image is string && data.image.size() < 1000)) &&
+             (!('isOnline' in data) || data.isOnline is bool) &&
+             (!('lastSeen' in data) || data.lastSeen is timestamp) &&
+             (!('typingTo' in data) || data.typingTo == null || (data.typingTo is string && data.typingTo.size() < 256));
+    }
+
+    function isValidDiagnosis(data) {
+      return hasOnlyAllowedFields(['patientEmail', 'condition', 'risk', 'explanation', 'timestamp', 'feature_importance']) &&
+             data.patientEmail is string && data.patientEmail.size() < 256 &&
+             data.condition is string && data.condition.size() < 256 &&
+             data.risk is number &&
+             data.explanation is string && data.explanation.size() < 10000 &&
+             data.timestamp is timestamp &&
+             (!('feature_importance' in data) || (data.feature_importance is list && data.feature_importance.size() < 50 && (data.feature_importance.size() == 0 || data.feature_importance[0] is map)));
+    }
+
+    function isValidSharedDiagnosis(data) {
+      return hasOnlyAllowedFields(['patientEmail', 'patientName', 'doctorEmail', 'condition', 'risk', 'explanation', 'recommendations', 'expiresAt', 'createdAt']) &&
+             data.patientEmail is string && data.patientEmail.size() < 256 &&
+             data.patientName is string && data.patientName.size() < 128 &&
+             (!('doctorEmail' in data) || data.doctorEmail == null || (data.doctorEmail is string && data.doctorEmail.size() < 256)) &&
+             data.condition is string && data.condition.size() < 256 &&
+             data.risk is number &&
+             data.explanation is string && data.explanation.size() < 10000 &&
+             (!('recommendations' in data) || (data.recommendations is list && data.recommendations.size() < 50 && (data.recommendations.size() == 0 || data.recommendations[0] is string))) &&
+             data.expiresAt is timestamp &&
+             data.createdAt is timestamp;
+    }
+
+    function isValidAppointment(data) {
+      return hasOnlyAllowedFields(['patientEmail', 'patientName', 'doctorName', 'doctorEmail', 'doctorSpecialty', 'doctorImage', 'location', 'date', 'time', 'status', 'timestamp', 'updatedAt', 'reminder24hSent', 'reminder1hSent']) &&
+             data.patientEmail is string && data.patientEmail.size() < 256 &&
+             (!('patientName' in data) || data.patientName == null || (data.patientName is string && data.patientName.size() < 256)) &&
+             data.doctorName is string && data.doctorName.size() < 256 &&
+             data.doctorEmail is string && data.doctorEmail.size() < 256 &&
+             (!('doctorSpecialty' in data) || data.doctorSpecialty == null || (data.doctorSpecialty is string && data.doctorSpecialty.size() < 256)) &&
+             (!('doctorImage' in data) || data.doctorImage == null || (data.doctorImage is string && data.doctorImage.size() < 1000)) &&
+             (!('location' in data) || data.location == null || (data.location is string && data.location.size() < 512)) &&
+             data.date is string && data.date.size() < 32 &&
+             data.time is string && data.time.size() < 32 &&
+             data.status in ['booked', 'completed', 'cancelled'] &&
+             data.timestamp is timestamp &&
+             (!('reminder24hSent' in data) || data.reminder24hSent is bool) &&
+             (!('reminder1hSent' in data) || data.reminder1hSent is bool);
+    }
+
+    function isValidCall(data) {
+      return hasOnlyAllowedFields(['offer', 'answer', 'callerEmail', 'callerName', 'receiverEmail', 'receiverName', 'status', 'timestamp']) &&
+             (!('offer' in data) || data.offer is map) &&
+             (!('answer' in data) || data.answer is map) &&
+             data.callerEmail is string && data.callerEmail.size() < 256 &&
+             (!('callerName' in data) || (data.callerName is string && data.callerName.size() < 128)) &&
+             data.receiverEmail is string && data.receiverEmail.size() < 256 &&
+             (!('receiverName' in data) || (data.receiverName is string && data.receiverName.size() < 128)) &&
+             data.status in ['calling', 'active', 'ended'] &&
+             data.timestamp is timestamp;
+    }
+
+    function isValidPrescription(data) {
+      return hasOnlyAllowedFields(['patientEmail', 'patientName', 'doctorName', 'doctorEmail', 'date', 'medications', 'notes', 'prescriptionImage', 'timestamp']) &&
+             data.patientEmail is string && data.patientEmail.size() < 256 &&
+             data.doctorName is string && data.doctorName.size() < 128 &&
+             data.date is string && data.date.size() < 32 &&
+             (!('medications' in data) || (data.medications is list && data.medications.size() < 100)) &&
+             (!('prescriptionImage' in data) || (data.prescriptionImage is string && data.prescriptionImage.size() < 1000)) &&
+             data.timestamp is timestamp;
+    }
+
+    function isValidPayment(data) {
+      return hasOnlyAllowedFields(['patientEmail', 'patientName', 'amount', 'currency', 'status', 'description', 'method', 'timestamp']) &&
+             data.patientEmail is string && data.patientEmail.size() < 256 &&
+             (!('patientName' in data) || data.patientName == null || (data.patientName is string && data.patientName.size() < 128)) &&
+             data.amount is number && data.amount > 0 &&
+             (!('currency' in data) || (data.currency is string && data.currency.size() < 10)) &&
+             data.status in ['pending', 'completed', 'failed'] &&
+             data.description is string && data.description.size() < 512 &&
+             (!('method' in data) || (data.method is string && data.method.size() < 128)) &&
+             data.timestamp is timestamp;
+    }
+
+    function isValidSubscription(data) {
+      return hasOnlyAllowedFields(['userEmail', 'plan', 'status', 'amount', 'startDate', 'endDate', 'timestamp']) &&
+             data.userEmail is string && data.userEmail.size() < 256 &&
+             data.plan in ['monthly', 'yearly', 'doctor_pro', 'doctor_annual'] &&
+             data.status in ['active', 'expired', 'cancelled'] &&
+             data.amount is number && data.amount >= 0 &&
+             (!('startDate' in data) || data.startDate is timestamp) &&
+             (!('endDate' in data) || data.endDate is timestamp) &&
+             data.timestamp is timestamp;
+    }
+
+    function isValidSlot(data) {
+      return hasOnlyAllowedFields(['doctorEmail', 'doctorName', 'date', 'time', 'isAvailable', 'timestamp', 'updatedAt']) &&
+             data.doctorEmail is string && data.doctorEmail.size() < 256 &&
+             data.doctorName is string && data.doctorName.size() < 128 &&
+             data.date is string && data.date.size() < 32 &&
+             data.time is string && data.time.size() < 32 &&
+             data.isAvailable is bool &&
+             data.timestamp is timestamp &&
+             (!('updatedAt' in data) || data.updatedAt is timestamp);
+    }
+
+    function isValidCallHistory(data) {
+      return hasOnlyAllowedFields(['callerEmail', 'callerName', 'receiverEmail', 'receiverName', 'startTime', 'endTime', 'duration', 'status', 'participants', 'timestamp']) &&
+             data.callerEmail is string && data.callerEmail.size() < 256 &&
+             data.receiverEmail is string && data.receiverEmail.size() < 256 &&
+             data.startTime is timestamp &&
+             data.endTime is timestamp &&
+             data.duration is number && data.duration >= 0 &&
+             data.status in ['completed', 'missed', 'rejected'] &&
+             data.participants is list &&
+             data.participants.size() == 2 &&
+             (data.timestamp == null || data.timestamp is timestamp);
+    }
+
+    function isValidMessage(data) {
+      return hasOnlyAllowedFields(['senderEmail', 'senderName', 'receiverEmail', 'receiverName', 'text', 'participants', 'isRead', 'timestamp']) &&
+             data.senderEmail is string && data.senderEmail.size() < 256 &&
+             data.receiverEmail is string && data.receiverEmail.size() < 256 &&
+             data.text is string &&
+             data.text.size() < 5000 &&
+             data.participants is list &&
+             data.participants.size() == 2 &&
+             data.participants.hasAll([data.senderEmail, data.receiverEmail]) &&
+             (!('isRead' in data) || data.isRead is bool) &&
+             (data.timestamp == null || data.timestamp is timestamp);
+    }
+
+    function isValidNotification(data) {
+      return hasOnlyAllowedFields(['recipientEmail', 'message', 'type', 'appointmentId', 'timestamp', 'sentVia']) &&
+             data.recipientEmail is string && data.recipientEmail.size() < 256 &&
+             data.message is string && data.message.size() < 1000 &&
+             data.type is string && data.type.size() < 128 &&
+             (!('appointmentId' in data) || (data.appointmentId is string && data.appointmentId.size() < 128)) &&
+             data.timestamp is timestamp &&
+             (!('sentVia' in data) || (data.sentVia is list && data.sentVia.size() < 10));
+    }
+
+    function isValidConversation(data) {
+      return hasOnlyAllowedFields(['participants', 'participantsData', 'lastMessage', 'lastMessageTimestamp', 'typing', 'isAiBot', 'createdAt']) &&
+             data.participants is list &&
+             data.participants.size() >= 2 &&
+             data.createdAt is timestamp &&
+             (!('isAiBot' in data) || data.isAiBot is bool) &&
+             (!('typing' in data) || data.typing is map);
+    }
+
+    function isValidConversationMessage(data) {
+      return hasOnlyAllowedFields(['text', 'senderEmail', 'senderName', 'timestamp', 'readBy', 'isAiGenerated']) &&
+             data.text is string && data.text.size() < 10000 &&
+             data.senderEmail is string &&
+             data.timestamp is timestamp &&
+             (!('readBy' in data) || data.readBy is map) &&
+             (!('isAiGenerated' in data) || data.isAiGenerated is bool);
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+
+    match /conversations/{convId} {
+      allow read: if isAuthenticated() && (request.auth.token.email in resource.data.participants || isAdmin());
+      allow create: if isAuthenticated() && isValidConversation(request.resource.data) && 
+                    (request.auth.token.email in request.resource.data.participants || isAdmin());
+      allow update: if isAuthenticated() && (request.auth.token.email in resource.data.participants || isAdmin()) &&
+                    (
+                      // Updating last message
+                      (request.resource.data.diff(resource.data).affectedKeys().hasAny(['lastMessage', 'lastMessageTimestamp'])) ||
+                      // Updating typing status
+                      (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['typing']))
+                    );
+      allow delete: if isAdmin();
+
+      match /messages/{messageId} {
+        allow read: if isAuthenticated() && (request.auth.token.email in get(/databases/$(database)/documents/conversations/$(convId)).data.participants || isAdmin());
+        allow create: if isAuthenticated() && isValidConversationMessage(request.resource.data) && 
+                      (request.auth.token.email == request.resource.data.senderEmail || 
+                       (get(/databases/$(database)/documents/conversations/$(convId)).data.isAiBot == true));
+        allow update: if isAuthenticated() && (request.auth.token.email in get(/databases/$(database)/documents/conversations/$(convId)).data.participants || isAdmin()) &&
+                      request.resource.data.diff(resource.data).affectedKeys().hasOnly(['readBy']);
+        allow delete: if isAdmin();
+      }
+    }
+
+    match /users/{userId} {
+      allow read: if isAuthenticated() && (isOwner(userId) || isDoctor() || isAdmin());
+      allow create: if isAuthenticated() && isOwner(userId) && 
+                    request.resource.data.email == request.auth.token.email &&
+                    isValidUser(request.resource.data) && 
+                    (request.resource.data.role != 'Admin' || isAdmin()) &&
+                    request.resource.data.keys().hasAll(['email', 'role', 'createdAt']);
+      allow update: if isAuthenticated() && isOwner(userId) && 
+                    request.resource.data.email == request.auth.token.email &&
+                    isValidUser(request.resource.data) &&
+                    (!('role' in resource.data) || request.resource.data.role == resource.data.role || isAdmin()) &&
+                    request.resource.data.email == resource.data.email &&
+                    request.resource.data.createdAt == resource.data.createdAt;
+    }
+
+    match /diagnoses/{diagnosisId} {
+      allow read: if isAuthenticated() && (request.auth.token.email == resource.data.patientEmail || isDoctor() || isAdmin());
+      allow create: if isAuthenticated() && isValidDiagnosis(request.resource.data) && 
+                    request.resource.data.patientEmail == request.auth.token.email;
+      allow update: if isAuthenticated() && (isDoctor() || isAdmin()) && isValidDiagnosis(request.resource.data) &&
+                    request.resource.data.patientEmail == resource.data.patientEmail &&
+                    request.resource.data.timestamp == resource.data.timestamp;
+      allow delete: if isAdmin();
+    }
+
+    match /shared_diagnoses/{shareId} {
+      allow get: if resource.data.expiresAt > request.time;
+      allow list: if isAuthenticated() && (request.auth.token.email == resource.data.patientEmail || isDoctor() || isAdmin());
+      allow create: if isAuthenticated() && isValidSharedDiagnosis(request.resource.data) &&
+                    request.resource.data.patientEmail == request.auth.token.email;
+      allow delete: if isAuthenticated() && (resource.data.patientEmail == request.auth.token.email || isAdmin());
+    }
+
+    match /appointments/{appointmentId} {
+      allow read: if isAuthenticated() && (
+        request.auth.token.email == resource.data.patientEmail || 
+        request.auth.token.email == resource.data.doctorEmail || 
+        isAdmin() || 
+        isDoctor()
+      );
+      allow create: if isAuthenticated() && isValidAppointment(request.resource.data) && 
+                    (request.resource.data.patientEmail == request.auth.token.email || isAdmin());
+      allow update: if isAuthenticated() && isValidAppointment(request.resource.data) && (
+                      isAdmin() || 
+                      isDoctor() || 
+                      (request.auth.token.email == resource.data.patientEmail && 
+                       request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status']) &&
+                       request.resource.data.status == 'cancelled')
+                    );
+      allow delete: if isAdmin();
+    }
+
+    match /notifications/{notificationId} {
+      allow read: if isAuthenticated() && (request.auth.token.email == resource.data.recipientEmail || isAdmin());
+      allow create: if isAdmin() && isValidNotification(request.resource.data);
+      allow update: if isAdmin() && isValidNotification(request.resource.data);
+      allow delete: if isAuthenticated() && (request.auth.token.email == resource.data.recipientEmail || isAdmin());
+    }
+
+    match /calls/{callId} {
+      allow read: if isAuthenticated() && (request.auth.token.email == resource.data.callerEmail || request.auth.token.email == resource.data.receiverEmail || isAdmin());
+      allow create: if isAuthenticated() && isValidCall(request.resource.data) &&
+                    (request.resource.data.callerEmail == request.auth.token.email || isAdmin());
+      allow update: if isAuthenticated() && isValidCall(request.resource.data) && (request.auth.token.email == resource.data.callerEmail || request.auth.token.email == resource.data.receiverEmail || isAdmin());
+      allow delete: if isAdmin();
+
+      match /callerCandidates/{candidateId} {
+        allow read, write: if isAuthenticated() && 
+          (request.auth.token.email == get(/databases/$(database)/documents/calls/$(callId)).data.callerEmail || 
+           request.auth.token.email == get(/databases/$(database)/documents/calls/$(callId)).data.receiverEmail || 
+           isAdmin());
+      }
+      match /receiverCandidates/{candidateId} {
+        allow read, write: if isAuthenticated() && 
+          (request.auth.token.email == get(/databases/$(database)/documents/calls/$(callId)).data.callerEmail || 
+           request.auth.token.email == get(/databases/$(database)/documents/calls/$(callId)).data.receiverEmail || 
+           isAdmin());
+      }
+      match /messages/{messageId} {
+        allow read, create: if isAuthenticated() && 
+          (request.auth.token.email == get(/databases/$(database)/documents/calls/$(callId)).data.callerEmail || 
+           request.auth.token.email == get(/databases/$(database)/documents/calls/$(callId)).data.receiverEmail || 
+           isAdmin());
+      }
+    }
+
+    match /prescriptions/{prescriptionId} {
+      allow read: if isAuthenticated() && (request.auth.token.email == resource.data.patientEmail || isDoctor() || isAdmin());
+      allow create: if isAuthenticated() && isDoctor() && isValidPrescription(request.resource.data);
+      allow update: if isAuthenticated() && (isDoctor() || isAdmin()) && isValidPrescription(request.resource.data);
+      allow delete: if isAdmin();
+    }
+
+    match /payments/{paymentId} {
+      allow read: if isAuthenticated() && (request.auth.token.email == resource.data.patientEmail || isAdmin());
+      allow create: if isAuthenticated() && (request.resource.data.patientEmail == request.auth.token.email || isAdmin()) && isValidPayment(request.resource.data);
+      allow update: if isAdmin() && isValidPayment(request.resource.data);
+      allow delete: if isAdmin();
+    }
+
+    match /subscriptions/{subscriptionId} {
+      allow read: if isAuthenticated() && (request.auth.token.email == resource.data.userEmail || isAdmin());
+      allow create: if isAuthenticated() && (request.resource.data.userEmail == request.auth.token.email || isAdmin()) && isValidSubscription(request.resource.data);
+      allow update: if isAuthenticated() && (request.auth.token.email == resource.data.userEmail || isAdmin()) && isValidSubscription(request.resource.data);
+      allow delete: if isAdmin();
+    }
+
+    match /slots/{slotId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() && isDoctor() && isValidSlot(request.resource.data) && 
+                    request.resource.data.doctorEmail == request.auth.token.email;
+      allow update: if isAuthenticated() && (
+                    (isDoctor() && resource.data.doctorEmail == request.auth.token.email) ||
+                    (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['isAvailable', 'updatedAt']) &&
+                     request.resource.data.isAvailable == false)
+      );
+      allow delete: if isAuthenticated() && isDoctor() && 
+                    resource.data.doctorEmail == request.auth.token.email;
+    }
+
+    match /callHistory/{historyId} {
+      allow read: if isAuthenticated() && (request.auth.token.email in resource.data.participants || isAdmin());
+      allow create: if isAuthenticated() && isValidCallHistory(request.resource.data) && 
+                    (request.auth.token.email in request.resource.data.participants || isAdmin());
+      allow delete: if isAdmin();
+    }
+
+    match /messages/{messageId} {
+      allow read: if isAuthenticated() && (request.auth.token.email in resource.data.participants || isAdmin());
+      allow create: if isAuthenticated() && isValidMessage(request.resource.data) && 
+                    request.resource.data.senderEmail == request.auth.token.email;
+      allow update: if isAuthenticated() && 
+                    request.auth.token.email == resource.data.receiverEmail &&
+                    request.resource.data.diff(resource.data).affectedKeys().hasOnly(['isRead']) &&
+                    request.resource.data.isRead == true;
+      allow delete: if isAdmin();
+    }
+  }
+}

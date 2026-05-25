@@ -1,0 +1,12 @@
+{
+  "name": "TeleMed AI: Advanced Diagnosis & Care",
+  "description": "A comprehensive telemedicine platform featuring AI-powered diagnostics, real-time pharmacy mapping, and patient management.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone",
+    "geolocation"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

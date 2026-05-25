@@ -1,0 +1,323 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User profile information",
+      "type": "object",
+      "properties": {
+        "email": { "type": "string", "format": "email" },
+        "role": { "type": "string", "enum": ["Patient", "Doctor", "Admin"] },
+        "name": { "type": "string" },
+        "age": { "type": "number" },
+        "gender": { "type": "string", "enum": ["Male", "Female", "Other"] },
+        "bloodGroup": { "type": "string" },
+        "allergies": { "type": "string" },
+        "medicalHistory": { "type": "string" },
+        "subscribed": { "type": "boolean" },
+        "isOnline": { "type": "boolean" },
+        "lastSeen": { "type": "string", "format": "date-time" },
+        "typingTo": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["email", "role"]
+    },
+    "Diagnosis": {
+      "title": "Diagnosis",
+      "description": "Historical diagnosis results",
+      "type": "object",
+      "properties": {
+        "patientEmail": { "type": "string" },
+        "condition": { "type": "string" },
+        "risk": { "type": "number" },
+        "explanation": { "type": "string" },
+        "timestamp": { "type": "string", "format": "date-time" }
+      },
+      "required": ["patientEmail", "risk"]
+    },
+    "SharedDiagnosis": {
+      "title": "SharedDiagnosis",
+      "description": "Secure, temporary sharing links for diagnoses",
+      "type": "object",
+      "properties": {
+        "patientEmail": { "type": "string" },
+        "patientName": { "type": "string" },
+        "doctorEmail": { "type": "string" },
+        "condition": { "type": "string" },
+        "risk": { "type": "number" },
+        "explanation": { "type": "string" },
+        "recommendations": { "type": "array", "items": { "type": "string" } },
+        "expiresAt": { "type": "string", "format": "date-time" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["patientEmail", "patientName", "condition", "risk", "explanation", "expiresAt", "createdAt"]
+    },
+    "Appointment": {
+      "title": "Appointment",
+      "description": "Scheduled medical appointments",
+      "type": "object",
+      "properties": {
+        "patientEmail": { "type": "string" },
+        "doctorName": { "type": "string" },
+        "doctorSpecialty": { "type": "string" },
+        "doctorImage": { "type": "string" },
+        "location": { "type": "string" },
+        "date": { "type": "string" },
+        "time": { "type": "string" },
+        "status": { "type": "string", "enum": ["booked", "completed", "cancelled"] },
+        "timestamp": { "type": "string", "format": "date-time" }
+      },
+      "required": ["patientEmail", "doctorName", "date", "time", "status"]
+    },
+    "Call": {
+      "title": "Call",
+      "description": "WebRTC signaling data for video calls",
+      "type": "object",
+      "properties": {
+        "offer": { "type": "object" },
+        "answer": { "type": "object" },
+        "callerEmail": { "type": "string" },
+        "receiverEmail": { "type": "string" },
+        "status": { "type": "string", "enum": ["calling", "active", "ended"] },
+        "timestamp": { "type": "string", "format": "date-time" }
+      }
+    },
+    "Prescription": {
+      "title": "Prescription",
+      "description": "Medical prescriptions issued by doctors",
+      "type": "object",
+      "properties": {
+        "patientEmail": { "type": "string" },
+        "patientName": { "type": "string" },
+        "doctorName": { "type": "string" },
+        "doctorEmail": { "type": "string" },
+        "date": { "type": "string", "format": "date" },
+        "medications": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": { "type": "string" },
+              "dosage": { "type": "string" },
+              "frequency": { "type": "string" },
+              "duration": { "type": "string" },
+              "instructions": { "type": "string" }
+            }
+          }
+        },
+        "notes": { "type": "string" },
+        "prescriptionImage": { "type": "string" },
+        "timestamp": { "type": "string", "format": "date-time" }
+      },
+      "required": ["patientEmail", "doctorName", "date"]
+    },
+    "Payment": {
+      "title": "Payment",
+      "description": "Financial transactions for medical services",
+      "type": "object",
+      "properties": {
+        "patientEmail": { "type": "string" },
+        "patientName": { "type": "string" },
+        "amount": { "type": "number" },
+        "currency": { "type": "string" },
+        "status": { "type": "string", "enum": ["pending", "completed", "failed"] },
+        "description": { "type": "string" },
+        "method": { "type": "string" },
+        "timestamp": { "type": "string", "format": "date-time" }
+      },
+      "required": ["patientEmail", "amount", "status", "description"]
+    },
+    "Subscription": {
+      "title": "Subscription",
+      "description": "Platform subscription records",
+      "type": "object",
+      "properties": {
+        "userEmail": { "type": "string" },
+        "plan": { "type": "string", "enum": ["monthly", "yearly", "doctor_pro", "doctor_annual"] },
+        "status": { "type": "string", "enum": ["active", "expired", "cancelled"] },
+        "amount": { "type": "number" },
+        "startDate": { "type": "string", "format": "date-time" },
+        "endDate": { "type": "string", "format": "date-time" },
+        "timestamp": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userEmail", "plan", "status", "amount"]
+    },
+    "Slot": {
+      "title": "Slot",
+      "description": "Doctor availability slots",
+      "type": "object",
+      "properties": {
+        "doctorEmail": { "type": "string" },
+        "doctorName": { "type": "string" },
+        "date": { "type": "string" },
+        "time": { "type": "string" },
+        "isAvailable": { "type": "boolean" },
+        "timestamp": { "type": "string", "format": "date-time" }
+      },
+      "required": ["doctorEmail", "date", "time", "isAvailable"]
+    },
+    "Message": {
+      "title": "Message",
+      "description": "Secure direct messages between patients and doctors",
+      "type": "object",
+      "properties": {
+        "senderEmail": { "type": "string" },
+        "senderName": { "type": "string" },
+        "receiverEmail": { "type": "string" },
+        "receiverName": { "type": "string" },
+        "text": { "type": "string" },
+        "participants": { 
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "isRead": { "type": "boolean" },
+        "timestamp": { "type": "string", "format": "date-time" }
+      },
+      "required": ["senderEmail", "receiverEmail", "text", "participants"]
+    },
+    "CallHistory": {
+      "title": "CallHistory",
+      "description": "Historical record of video consultations",
+      "type": "object",
+      "properties": {
+        "callerEmail": { "type": "string" },
+        "callerName": { "type": "string" },
+        "receiverEmail": { "type": "string" },
+        "receiverName": { "type": "string" },
+        "startTime": { "type": "string", "format": "date-time" },
+        "endTime": { "type": "string", "format": "date-time" },
+        "duration": { "type": "number" },
+        "status": { "type": "string", "enum": ["completed", "missed", "rejected"] },
+        "participants": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "timestamp": { "type": "string", "format": "date-time" }
+      },
+      "required": ["callerEmail", "receiverEmail", "startTime", "endTime", "duration", "status", "participants"]
+    },
+    "Notification": {
+      "title": "Notification",
+      "description": "System notifications for users",
+      "type": "object",
+      "properties": {
+        "recipientEmail": { "type": "string" },
+        "message": { "type": "string" },
+        "type": { "type": "string" },
+        "appointmentId": { "type": "string" },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "sentVia": { 
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      },
+      "required": ["recipientEmail", "message", "type", "timestamp"]
+    },
+    "Conversation": {
+      "title": "Conversation",
+      "description": "A chat session between two or more participants",
+      "type": "object",
+      "properties": {
+        "participants": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "participantsData": {
+          "type": "object",
+          "description": "Metadata for participants (e.g., names, roles)"
+        },
+        "lastMessage": { "type": "string" },
+        "lastMessageTimestamp": { "type": "string", "format": "date-time" },
+        "typing": {
+          "type": "object",
+          "description": "Map of email to timestamp of when they were last typing"
+        },
+        "isAiBot": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["participants", "createdAt"]
+    },
+    "ConversationMessage": {
+      "title": "ConversationMessage",
+      "description": "A single message within a conversation",
+      "type": "object",
+      "properties": {
+        "text": { "type": "string" },
+        "senderEmail": { "type": "string" },
+        "senderName": { "type": "string" },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "readBy": {
+          "type": "object",
+          "description": "Map of email to timestamp of when they read this message"
+        },
+        "isAiGenerated": { "type": "boolean" }
+      },
+      "required": ["text", "senderEmail", "timestamp"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "User profiles"
+    },
+    "/conversations/{convId}": {
+      "schema": "Conversation",
+      "description": "Chat conversations"
+    },
+    "/conversations/{convId}/messages/{msgId}": {
+      "schema": "ConversationMessage",
+      "description": "Messages within a conversation"
+    },
+    "/diagnoses/{diagnosisId}": {
+      "schema": "Diagnosis",
+      "description": "Diagnosis history"
+    },
+    "/shared_diagnoses/{shareId}": {
+      "schema": "SharedDiagnosis",
+      "description": "Secure, temporary shared diagnoses accessible via share link"
+    },
+    "/appointments/{appointmentId}": {
+      "schema": "Appointment",
+      "description": "Appointment schedule"
+    },
+    "/calls/{callId}": {
+      "schema": "Call",
+      "description": "Video call signaling"
+    },
+    "/prescriptions/{prescriptionId}": {
+      "schema": "Prescription",
+      "description": "Prescription records"
+    },
+    "/payments/{paymentId}": {
+      "schema": "Payment",
+      "description": "Transaction records"
+    },
+    "/subscriptions/{subscriptionId}": {
+      "schema": "Subscription",
+      "description": "User subscriptions"
+    },
+    "/slots/{slotId}": {
+      "schema": "Slot",
+      "description": "Doctor availability slots"
+    },
+    "/messages/{messageId}": {
+      "schema": "Message",
+      "description": "Direct messages"
+    },
+    "/callHistory/{historyId}": {
+      "schema": "CallHistory",
+      "description": "Video call history"
+    },
+    "/notifications/{notificationId}": {
+      "schema": "Notification",
+      "description": "User notifications"
+    },
+    "/calls/{callId}/callerCandidates/{id}": {
+      "schema": "object",
+      "description": "ICE candidates from caller"
+    },
+    "/calls/{callId}/receiverCandidates/{id}": {
+      "schema": "object",
+      "description": "ICE candidates from receiver"
+    }
+  }
+}
