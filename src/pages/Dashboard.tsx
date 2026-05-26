@@ -23,8 +23,7 @@ import {
 import { Link } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { useConfirmation } from '../context/ConfirmationContext';
-import { collection, query, where, orderBy, limit, getDocs, onSnapshot, doc, updateDoc, deleteDoc, addDoc, serverTimestamp } from 'firebase/firestore';
-import { db, handleFirestoreError, OperationType } from '../firebase';
+import { supabase } from '../supabase';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 
@@ -33,7 +32,7 @@ function cn(...inputs: ClassValue[]) {
 }
 
 export default function Dashboard() {
-  const { profile, user } = useAuth();
+  const { profile, user, updateRole } = useAuth();
   const { confirm } = useConfirmation();
   const [recentDiagnoses, setRecentDiagnoses] = useState<any[]>([]);
   const [recentAppointments, setRecentAppointments] = useState<any[]>([]);
@@ -48,27 +47,34 @@ export default function Dashboard() {
     const newStatus = !profile.isOnline;
     
     try {
-      const userRef = doc(db, 'users', user.uid);
-      
-      // 1. Update isOnline status
-      await updateDoc(userRef, {
-        isOnline: newStatus,
-        lastSeen: serverTimestamp()
-      });
+      // 1. Update isOnline status in public.users
+      const { error: userErr } = await supabase
+        .from('users')
+        .update({
+          is_online: newStatus,
+          last_seen: new Date().toISOString()
+        })
+        .eq('id', user.id);
+
+      if (userErr) throw userErr;
+
+      // Update local profile directly to keep UI responsive
+      profile.isOnline = newStatus;
 
       // 2. Real-time slot management:
       const todayStr = new Date().toISOString().split('T')[0];
       
       if (newStatus) {
         // Find existing slots for today
-        const slotsQuery = query(
-          collection(db, 'slots'),
-          where('doctorEmail', '==', profile.email),
-          where('date', '==', todayStr)
-        );
-        const slotsSnap = await getDocs(slotsQuery);
+        const { data: slotsSnap, error: slotsErr } = await supabase
+          .from('slots')
+          .select('*')
+          .eq('doctor_email', profile.email)
+          .eq('slot_date', todayStr);
+
+        if (slotsErr) throw slotsErr;
         
-        if (slotsSnap.empty) {
+        if (!slotsSnap || slotsSnap.length === 0) {
           // If no slots exist for today, automatically register 3 consult hours from next hour onwards!
           const now = new Date();
           const currentHour = now.getHours();
@@ -79,34 +85,43 @@ export default function Dashboard() {
             const h12 = nextHour % 12 || 12;
             const formattedTime = `${h12.toString().padStart(2, '0')}:00 ${ampm}`;
             
-            await addDoc(collection(db, 'slots'), {
-              doctorEmail: profile.email,
-              doctorName: profile.name || profile.email.split('@')[0],
-              date: todayStr,
-              time: formattedTime,
-              isAvailable: true,
-              timestamp: serverTimestamp()
-            });
+            await supabase
+              .from('slots')
+              .insert({
+                doctor_email: profile.email,
+                doctor_name: profile.name || profile.email.split('@')[0],
+                slot_date: todayStr,
+                slot_time: formattedTime,
+                is_available: true
+              });
           }
         } else {
-          // Toggle existing today's slots to isAvailable: true
-          for (const docObj of slotsSnap.docs) {
-            await updateDoc(doc(db, 'slots', docObj.id), {
-              isAvailable: true
-            });
+          // Toggle existing today's slots to is_available: true
+          for (const s of slotsSnap) {
+            await supabase
+              .from('slots')
+              .update({ is_available: true })
+              .eq('id', s.id);
           }
         }
       } else {
-        // Toggled OFF: Mark available slots as unavailable for safety (so patients don't book them), or delete unoccupied ones
-        const slotsQuery = query(
-          collection(db, 'slots'),
-          where('doctorEmail', '==', profile.email),
-          where('date', '==', todayStr),
-          where('isAvailable', '==', true)
-        );
-        const slotsSnap = await getDocs(slotsQuery);
-        for (const docObj of slotsSnap.docs) {
-          await deleteDoc(doc(db, 'slots', docObj.id));
+        // Toggled OFF: Mark available slots as unavailable or delete unoccupied ones
+        const { data: slotsSnap, error: slotsErr } = await supabase
+          .from('slots')
+          .select('*')
+          .eq('doctor_email', profile.email)
+          .eq('slot_date', todayStr)
+          .eq('is_available', true);
+
+        if (slotsErr) throw slotsErr;
+
+        if (slotsSnap) {
+          for (const s of slotsSnap) {
+            await supabase
+              .from('slots')
+              .delete()
+              .eq('id', s.id);
+          }
         }
       }
     } catch (error) {
@@ -119,81 +134,127 @@ export default function Dashboard() {
   useEffect(() => {
     if (!profile?.email) return;
 
-    let unsubscribeAppts: () => void;
-    let unsubscribeNotifs: () => void;
+    let notifChannel: any;
+    let apptChannel: any;
 
-    // Fetch Notifications
-    const notifQuery = query(
-      collection(db, 'notifications'),
-      where('recipientEmail', '==', profile.email),
-      orderBy('timestamp', 'desc'),
-      limit(5)
-    );
+    const fetchNotifications = async () => {
+      try {
+        const { data, error } = await supabase
+          .from('notifications')
+          .select('*')
+          .eq('recipient_email', profile.email)
+          .order('created_at', { ascending: false })
+          .limit(5);
 
-    unsubscribeNotifs = onSnapshot(notifQuery, (snapshot) => {
-      const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-      setNotifications(data);
-    }, (error) => {
-      handleFirestoreError(error, OperationType.GET, 'notifications');
-    });
+        if (error) throw error;
+        setNotifications(data || []);
+      } catch (err) {
+        console.error("Error fetching notifications:", err);
+      }
+    };
 
-    if (profile.role === 'Doctor') {
-      // Doctor View: Fetch recent appointments for this doctor
-      const q = query(
-        collection(db, 'appointments'),
-        where('doctorEmail', '==', profile.email),
-        orderBy('timestamp', 'desc'),
-        limit(5)
-      );
-      
-      unsubscribeAppts = onSnapshot(q, (snapshot) => {
-        const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-        setRecentAppointments(data);
+    const fetchRecentAppointments = async () => {
+      try {
+        const { data, error } = await supabase
+          .from('appointments')
+          .select('*')
+          .eq('doctor_email', profile.email)
+          .order('created_at', { ascending: false })
+          .limit(5);
+
+        if (error) throw error;
+        // Map slot dates and times into compatible structures
+        const mapped = (data || []).map(a => ({
+          id: a.id,
+          patientEmail: a.patient_email,
+          patientName: a.patient_name,
+          date: a.appointment_date,
+          time: a.appointment_time,
+          status: a.status
+        }));
+        setRecentAppointments(mapped);
         setIsLoading(false);
-      }, (error) => {
-        handleFirestoreError(error, OperationType.GET, 'appointments');
+      } catch (err) {
+        console.error("Error fetching doctor appointments:", err);
         setIsLoading(false);
-      });
-    } else {
-      // Patient View: Fetch recent diagnoses
-      const q = query(
-        collection(db, 'diagnoses'),
-        where('patientEmail', '==', profile.email),
-        orderBy('timestamp', 'desc'),
-        limit(20)
-      );
-      
-      unsubscribeAppts = onSnapshot(q, (snapshot) => {
-        const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() as any }));
-        
+      }
+    };
+
+    const fetchRecentDiagnoses = async () => {
+      try {
+        const { data, error } = await supabase
+          .from('diagnoses')
+          .select('*')
+          .eq('patient_email', profile.email)
+          .order('created_at', { ascending: false })
+          .limit(20);
+
+        if (error) throw error;
+
         // Deduplicate to ensure only one unique diagnosis entry per condition per patient is shown (keeping the latest)
         const uniqueData: any[] = [];
         const seenKeys = new Set<string>();
         
-        for (const item of data) {
-          const patientKey = (item.patientEmail || profile.email || '').toLowerCase().trim();
+        for (const item of (data || [])) {
+          const patientKey = (item.patient_email || profile.email || '').toLowerCase().trim();
           const conditionKey = (item.condition || '').toLowerCase().trim();
           const compositeKey = `${patientKey}|${conditionKey}`;
           
           if (conditionKey && !seenKeys.has(compositeKey)) {
             seenKeys.add(compositeKey);
-            uniqueData.push(item);
+            uniqueData.push({
+              id: item.id,
+              condition: item.condition,
+              risk: item.risk,
+              explanation: item.explanation,
+              created_at: item.created_at
+            });
           }
         }
         
         setRecentDiagnoses(uniqueData.slice(0, 5));
         setIsLoading(false);
-      }, (error) => {
-        handleFirestoreError(error, OperationType.GET, 'diagnoses');
+      } catch (err) {
+        console.error("Error fetching patient diagnoses:", err);
         setIsLoading(false);
-      });
+      }
+    };
+
+    // Initial loads
+    fetchNotifications();
+
+    if (profile.role === 'Doctor') {
+      fetchRecentAppointments();
+      
+      apptChannel = supabase
+        .channel('doctor-appts')
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'appointments', filter: `doctor_email=eq.${profile.email}` }, () => {
+          fetchRecentAppointments();
+        })
+        .subscribe();
+    } else {
+      fetchRecentDiagnoses();
+
+      apptChannel = supabase
+        .channel('patient-diagnoses')
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'diagnoses', filter: `patient_email=eq.${profile.email}` }, () => {
+          fetchRecentDiagnoses();
+        })
+        .subscribe();
     }
 
+    notifChannel = supabase
+      .channel('recipient-notifs')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'notifications', filter: `recipient_email=eq.${profile.email}` }, () => {
+        fetchNotifications();
+      })
+      .subscribe();
+
     return () => {
-      unsubscribeAppts?.();
-      unsubscribeNotifs?.();
+      notifChannel?.unsubscribe();
+      apptChannel?.unsubscribe();
     };
-  }, [profile]);
+  }, [profile?.email, profile?.role]);
 
   const handleDeleteDiagnosis = async (id: string) => {
     const isConfirmed = await confirm({
@@ -206,9 +267,15 @@ export default function Dashboard() {
     if (!isConfirmed) return;
 
     try {
-      await deleteDoc(doc(db, 'diagnoses', id));
+      const { error } = await supabase
+        .from('diagnoses')
+        .delete()
+        .eq('id', id);
+
+      if (error) throw error;
+      setRecentDiagnoses(prev => prev.filter(d => d.id !== id));
     } catch (error) {
-      handleFirestoreError(error, OperationType.DELETE, `diagnoses/${id}`);
+      console.error("Error deleting diagnosis:", error);
     }
   };
 
@@ -327,7 +394,7 @@ export default function Dashboard() {
                       </div>
                       <div>
                         <p className="font-bold text-slate-800">{activity.condition}</p>
-                        <p className="text-xs text-slate-500">AI Diagnosis • {activity.timestamp?.toDate().toLocaleDateString()}</p>
+                        <p className="text-xs text-slate-500">AI Diagnosis • {activity.created_at ? new Date(activity.created_at).toLocaleDateString() : ''}</p>
                       </div>
                     </div>
                     <div className="flex items-center gap-2">
@@ -373,9 +440,9 @@ export default function Dashboard() {
                     <div className="flex-1 min-w-0">
                       <p className="text-sm font-bold text-slate-800">{notif.message}</p>
                       <div className="mt-1 flex items-center gap-2">
-                        <p className="text-[10px] text-slate-400 font-medium">{notif.timestamp?.toDate().toLocaleString()}</p>
+                        <p className="text-[10px] text-slate-400 font-medium">{notif.created_at ? new Date(notif.created_at).toLocaleString() : ''}</p>
                         <span className="text-[10px] bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded font-bold uppercase tracking-tighter">
-                          {notif.sentVia?.join(' & ')}
+                          {notif.sent_via?.join(' & ')}
                         </span>
                       </div>
                     </div>

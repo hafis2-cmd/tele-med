@@ -38,8 +38,7 @@ import {
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { useConfirmation } from '../context/ConfirmationContext';
-import { collection, addDoc, query, where, getDocs, serverTimestamp, orderBy, onSnapshot, deleteDoc, doc, updateDoc } from 'firebase/firestore';
-import { db, handleFirestoreError, OperationType } from '../firebase';
+import { supabase } from '../supabase';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 
@@ -220,10 +219,13 @@ export default function Appointments() {
 
       const eventData = await response.json();
       
-      await updateDoc(doc(db, 'appointments', app.id), {
-        googleCalendarEventId: eventData.id,
-        isSyncedToCalendar: true
-      });
+      await supabase
+        .from('appointments')
+        .update({
+          google_calendar_event_id: eventData.id,
+          is_synced_to_calendar: true
+        })
+        .eq('id', app.id);
 
       setSyncFeedback(prev => ({
         ...prev,
@@ -281,9 +283,12 @@ export default function Appointments() {
         throw new Error("No meetingUri returned from Google Meet API.");
       }
 
-      await updateDoc(doc(db, 'appointments', app.id), {
-        googleMeetLink: meetingUri
-      });
+      await supabase
+        .from('appointments')
+        .update({
+          google_meet_link: meetingUri
+        })
+        .eq('id', app.id);
 
       setSyncFeedback(prev => ({
         ...prev,
@@ -303,66 +308,124 @@ export default function Appointments() {
   useEffect(() => {
     if (profile?.role !== 'Doctor' || !profile?.email) return;
 
-    const q = query(
-      collection(db, 'slots'),
-      where('doctorEmail', '==', profile.email),
-      orderBy('date', 'asc'),
-      orderBy('time', 'asc')
-    );
+    const fetchDoctorSlots = async () => {
+      try {
+        const { data, error } = await supabase
+          .from('slots')
+          .select('*')
+          .eq('doctor_email', profile.email)
+          .order('slot_date', { ascending: true })
+          .order('slot_time', { ascending: true });
 
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      const docs = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-      setDoctorSlots(docs);
-    }, (error) => {
-      handleFirestoreError(error, OperationType.LIST, 'slots');
-    });
+        if (error) throw error;
+        setDoctorSlots((data || []).map(s => ({
+          id: s.id,
+          doctorEmail: s.doctor_email,
+          doctorName: s.doctor_name,
+          date: s.slot_date,
+          time: s.slot_time,
+          isAvailable: s.is_available
+        })));
+      } catch (err) {
+        console.error("Error fetching doctor slots:", err);
+      }
+    };
 
-    return () => unsubscribe();
+    fetchDoctorSlots();
+
+    const channel = supabase
+      .channel('doctor-slots')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'slots', filter: `doctor_email=eq.${profile.email}` }, () => {
+        fetchDoctorSlots();
+      })
+      .subscribe();
+
+    return () => {
+      channel.unsubscribe();
+    };
   }, [profile?.email, profile?.role]);
 
   useEffect(() => {
-    // Fetch real doctors
-    const q = query(collection(db, 'users'), where('role', '==', 'Doctor'));
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      const docs = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-      setDoctors(docs);
-    }, (error) => {
-      handleFirestoreError(error, OperationType.LIST, 'users');
-    });
-    return () => unsubscribe();
+    const fetchDoctors = async () => {
+      try {
+        const { data, error } = await supabase
+          .from('users')
+          .select('*')
+          .eq('role', 'Doctor');
+
+        if (error) throw error;
+        setDoctors(data || []);
+      } catch (err) {
+        console.error("Error fetching doctors list:", err);
+      }
+    };
+
+    fetchDoctors();
+
+    const channel = supabase
+      .channel('doctors-list')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'users', filter: `role=eq.Doctor` }, () => {
+        fetchDoctors();
+      })
+      .subscribe();
+
+    return () => {
+      channel.unsubscribe();
+    };
   }, []);
 
   useEffect(() => {
     if (!profile?.email) return;
 
-    let q;
-    if (profile.role === 'Doctor') {
-      q = query(
-        collection(db, 'appointments'),
-        where('doctorEmail', '==', profile.email)
-      );
-    } else {
-      q = query(
-        collection(db, 'appointments'),
-        where('patientEmail', '==', profile.email)
-      );
-    }
+    const fetchAppointments = async () => {
+      try {
+        const field = profile.role === 'Doctor' ? 'doctor_email' : 'patient_email';
+        const { data, error } = await supabase
+          .from('appointments')
+          .select('*')
+          .eq(field, profile.email)
+          .order('created_at', { ascending: false });
 
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      const docs = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-      const sortedDocs = docs.sort((a: any, b: any) => {
-        const timeA = a.timestamp?.seconds || 0;
-        const timeB = b.timestamp?.seconds || 0;
-        return timeB - timeA;
-      });
-      setAppointments(sortedDocs);
-      setIsLoading(false);
-    }, (error) => {
-      handleFirestoreError(error, OperationType.LIST, 'appointments');
-      setIsLoading(false);
-    });
+        if (error) throw error;
+        
+        const mapped = (data || []).map(a => ({
+          id: a.id,
+          patientEmail: a.patient_email,
+          patientName: a.patient_name,
+          doctorEmail: a.doctor_email,
+          doctorName: a.doctor_name,
+          doctorSpecialty: a.doctor_specialty,
+          doctorImage: a.doctor_image,
+          location: a.location,
+          date: a.appointment_date,
+          time: a.appointment_time,
+          status: a.status,
+          googleCalendarEventId: a.google_calendar_event_id,
+          isSyncedToCalendar: a.is_synced_to_calendar,
+          googleMeetLink: a.google_meet_link
+        }));
 
-    return () => unsubscribe();
+        setAppointments(mapped);
+        setIsLoading(false);
+      } catch (err) {
+        console.error("Error fetching appointments:", err);
+        setIsLoading(false);
+      }
+    };
+
+    fetchAppointments();
+
+    const filterField = profile.role === 'Doctor' ? 'doctor_email' : 'patient_email';
+    const channel = supabase
+      .channel('user-appointments')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'appointments', filter: `${filterField}=eq.${profile.email}` }, () => {
+        fetchAppointments();
+      })
+      .subscribe();
+
+    return () => {
+      channel.unsubscribe();
+    };
   }, [profile?.email, profile?.role]);
 
   useEffect(() => {
@@ -380,31 +443,40 @@ export default function Appointments() {
       setIsCheckingSlots(true);
       try {
         // Fetch doctor's defined slots
-        const slotsQuery = query(
-          collection(db, 'slots'),
-          where('doctorEmail', '==', selectedDoctor.email),
-          where('date', '==', selectedDate)
-        );
-        const slotsSnapshot = await getDocs(slotsQuery);
-        const slots = slotsSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        const { data: slotsData, error: slotsErr } = await supabase
+          .from('slots')
+          .select('*')
+          .eq('doctor_email', selectedDoctor.email)
+          .eq('slot_date', selectedDate);
+
+        if (slotsErr) throw slotsErr;
+
+        const slots = (slotsData || []).map(s => ({
+          id: s.id,
+          doctorEmail: s.doctor_email,
+          doctorName: s.doctor_name,
+          date: s.slot_date,
+          time: s.slot_time,
+          isAvailable: s.is_available
+        }));
         setAvailableSlots(slots);
 
-        // The sources of truth for booked slots should be both the isAvailable flag in slots
+        // The sources of truth for booked slots should be both the is_available flag in slots
         // AND the appointments collection (to ensure consistency if one fails)
         const bookedFromSlots = slots.filter((s: any) => !s.isAvailable).map((s: any) => s.time);
         
         // Fetch booked appointments
-        const appQuery = query(
-          collection(db, 'appointments'),
-          where('doctorEmail', '==', selectedDoctor.email),
-          where('date', '==', selectedDate),
-          where('status', '==', 'booked')
-        );
-        
         let bookedFromApps: string[] = [];
         try {
-          const appSnapshot = await getDocs(appQuery);
-          bookedFromApps = appSnapshot.docs.map(doc => doc.data().time);
+          const { data: appData, error: appErr } = await supabase
+            .from('appointments')
+            .select('appointment_time')
+            .eq('doctor_email', selectedDoctor.email)
+            .eq('appointment_date', selectedDate)
+            .eq('status', 'booked');
+
+          if (appErr) throw appErr;
+          bookedFromApps = (appData || []).map((doc: any) => doc.appointment_time);
         } catch (appError) {
           // If we can't read appointments (e.g. permission restriction), we'll rely only on slots
           console.warn("Could not fetch appointments for slot check, relying on slots only:", appError);
@@ -414,11 +486,6 @@ export default function Appointments() {
         setBookedSlots(allBooked);
       } catch (error: any) {
         console.error("Error fetching slots:", error);
-        try {
-          handleFirestoreError(error, OperationType.LIST, 'slots');
-        } catch (e) {
-          // Logged
-        }
       } finally {
         setIsCheckingSlots(false);
       }
@@ -439,28 +506,32 @@ export default function Appointments() {
       const patientName = profile?.name || (patientEmail ? patientEmail.split('@')[0] : 'Unknown Patient');
 
       // Create the appointment
-      await addDoc(collection(db, 'appointments'), {
-        patientEmail: patientEmail,
-        patientName: patientName,
-        doctorEmail: doctorEmail,
-        doctorName: doctorName,
-        doctorSpecialty: selectedDoctor.specialty || 'General Practitioner',
-        doctorImage: selectedDoctor.image || null,
-        location: selectedDoctor.location || 'TeleMed Clinic',
-        date: selectedDate,
-        time: selectedTime,
-        status: 'booked',
-        timestamp: serverTimestamp()
-      });
+      await supabase
+        .from('appointments')
+        .insert({
+          patient_email: patientEmail,
+          patient_name: patientName,
+          doctor_email: doctorEmail,
+          doctor_name: doctorName,
+          doctor_specialty: selectedDoctor.specialty || 'General Practitioner',
+          doctor_image: selectedDoctor.image || null,
+          location: selectedDoctor.location || 'TeleMed Clinic',
+          appointment_date: selectedDate,
+          appointment_time: selectedTime,
+          status: 'booked'
+        });
 
       // Also try to mark the slot as unavailable if it exists
       try {
         const slot = availableSlots.find((s: any) => s.time === selectedTime);
         if (slot) {
-          await updateDoc(doc(db, 'slots', slot.id), {
-            isAvailable: false,
-            updatedAt: serverTimestamp()
-          });
+          await supabase
+            .from('slots')
+            .update({
+              is_available: false,
+              updated_at: new Date().toISOString()
+            })
+            .eq('id', slot.id);
         }
       } catch (slotError) {
         console.warn("Failed to mark slot as unavailable:", slotError);
@@ -472,7 +543,7 @@ export default function Appointments() {
       setSelectedTime('');
       setShowSuccess(true);
     } catch (error) {
-      handleFirestoreError(error, OperationType.CREATE, 'appointments');
+      console.error("Error booking appointment:", error);
     } finally {
       setIsBooking(false);
     }
@@ -491,9 +562,10 @@ export default function Appointments() {
     }
 
     try {
-      await updateDoc(doc(db, 'appointments', id), {
-        status
-      });
+      await supabase
+        .from('appointments')
+        .update({ status })
+        .eq('id', id);
     } catch (error) {
       console.error("Error updating appointment status:", error);
     }
@@ -512,16 +584,17 @@ export default function Appointments() {
 
     setIsAddingSlot(true);
     try {
-      await addDoc(collection(db, 'slots'), {
-        doctorEmail: profile.email,
-        doctorName: profile.name || profile.email.split('@')[0],
-        date: newSlotDate,
-        time: formattedTime,
-        isAvailable: true,
-        timestamp: serverTimestamp()
-      });
+      await supabase
+        .from('slots')
+        .insert({
+          doctor_email: profile.email,
+          doctor_name: profile.name || profile.email.split('@')[0],
+          slot_date: newSlotDate,
+          slot_time: formattedTime,
+          is_available: true
+        });
     } catch (error) {
-      handleFirestoreError(error, OperationType.CREATE, 'slots');
+      console.error("Error adding slot:", error);
     } finally {
       setIsAddingSlot(false);
     }
@@ -538,9 +611,12 @@ export default function Appointments() {
     if (!isConfirmed) return;
 
     try {
-      await deleteDoc(doc(db, 'slots', id));
+      await supabase
+        .from('slots')
+        .delete()
+        .eq('id', id);
     } catch (error) {
-      handleFirestoreError(error, OperationType.DELETE, `slots/${id}`);
+      console.error("Error deleting slot:", error);
     }
   };
 

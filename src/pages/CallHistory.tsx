@@ -17,8 +17,7 @@ import {
   FileText
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
-import { db, handleFirestoreError, OperationType } from '../firebase';
-import { collection, query, where, orderBy, limit, onSnapshot, getDocs } from 'firebase/firestore';
+import { supabase } from '../supabase';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 import { useNavigate } from 'react-router-dom';
@@ -38,26 +37,34 @@ export default function CallHistory() {
   useEffect(() => {
     if (!profile?.email) return;
 
-    const q = query(
-      collection(db, 'callHistory'),
-      where('participants', 'array-contains', profile.email),
-      orderBy('startTime', 'desc'),
-      limit(50)
-    );
+    const fetchCalls = async () => {
+      try {
+        const { data, error } = await supabase
+          .from('call_history')
+          .select('*')
+          .contains('participants', [profile.email])
+          .order('start_time', { ascending: false })
+          .limit(50);
+        
+        if (error) throw error;
+        setCalls((data || []).map((d: any) => ({ id: d.id, callerEmail: d.caller_email, callerName: d.caller_name, receiverEmail: d.receiver_email, receiverName: d.receiver_name, startTime: d.start_time, duration: d.duration, status: d.status, participants: d.participants, ...d })));
+      } catch (err) {
+        console.error('Error fetching call history:', err);
+      } finally {
+        setLoading(false);
+      }
+    };
 
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      const history = snapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data()
-      }));
-      setCalls(history);
-      setLoading(false);
-    }, (error) => {
-      handleFirestoreError(error, OperationType.LIST, 'callHistory');
-      setLoading(false);
-    });
+    fetchCalls();
 
-    return () => unsubscribe();
+    const channel = supabase
+      .channel('call-history-realtime')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'call_history' }, () => {
+        fetchCalls();
+      })
+      .subscribe();
+
+    return () => { supabase.removeChannel(channel); };
   }, [profile?.email]);
 
   const formatDuration = (seconds: number) => {

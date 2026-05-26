@@ -17,22 +17,7 @@ import {
   Plus,
   X
 } from 'lucide-react';
-import { 
-  collection, 
-  query, 
-  where, 
-  onSnapshot, 
-  addDoc, 
-  updateDoc,
-  doc,
-  serverTimestamp, 
-  orderBy,
-  limit,
-  getDocs,
-  setDoc,
-  deleteField
-} from 'firebase/firestore';
-import { db, handleFirestoreError, OperationType } from '../firebase';
+import { supabase } from '../supabase';
 import { useAuth } from '../context/AuthContext';
 import { useSearchParams, useNavigate } from 'react-router-dom';
 import { clsx, type ClassValue } from 'clsx';
@@ -91,26 +76,42 @@ export default function Messages() {
   useEffect(() => {
     if (!profile?.email) return;
 
-    const q = query(
-      collection(db, 'conversations'),
-      where('participants', 'array-contains', profile.email),
-      orderBy('lastMessageTimestamp', 'desc')
-    );
+    const fetchConversations = async () => {
+      try {
+        const { data, error } = await supabase
+          .from('conversations')
+          .select('*')
+          .contains('participants', [profile.email])
+          .order('last_message_timestamp', { ascending: false });
+        
+        if (error) throw error;
+        setConversations((data || []).map((d: any) => ({
+          id: d.id,
+          participants: d.participants,
+          participantsData: d.participants_data || {},
+          lastMessage: d.last_message,
+          lastMessageTimestamp: d.last_message_timestamp,
+          typing: d.typing || {},
+          isAiBot: d.is_ai_bot || false,
+          createdAt: d.created_at
+        })));
+      } catch (err) {
+        console.error('Error fetching conversations:', err);
+      } finally {
+        setLoading(false);
+      }
+    };
 
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      const convs = snapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data()
-      })) as Conversation[];
+    fetchConversations();
 
-      setConversations(convs);
-      setLoading(false);
-    }, (error) => {
-      handleFirestoreError(error, OperationType.LIST, 'conversations');
-      setLoading(false);
-    });
+    const channel = supabase
+      .channel('conversations-realtime')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'conversations' }, () => {
+        fetchConversations();
+      })
+      .subscribe();
 
-    return () => unsubscribe();
+    return () => { supabase.removeChannel(channel); };
   }, [profile?.email]);
 
   // Sync selected chat if it updates in the background
@@ -132,20 +133,20 @@ export default function Messages() {
       setSearchingUsers(true);
       try {
         const targetRole = profile.role === 'Patient' ? 'Doctor' : 'Patient';
-        const q = query(
-          collection(db, 'users'),
-          where('role', '==', targetRole)
-        );
-        const snapshot = await getDocs(q);
-        const results = snapshot.docs
-          .map(doc => ({ id: doc.id, ...doc.data() }))
+        const { data, error } = await supabase
+          .from('users')
+          .select('*')
+          .eq('role', targetRole);
+        
+        if (error) throw error;
+        const results = (data || [])
           .filter((u: any) => 
             u.name?.toLowerCase().includes(userSearchQuery.toLowerCase()) ||
             u.email?.toLowerCase().includes(userSearchQuery.toLowerCase())
           );
         setSearchResults(results);
       } catch (error) {
-        console.error("Error searching users:", error);
+        console.error('Error searching users:', error);
       } finally {
         setSearchingUsers(false);
       }
@@ -155,33 +156,35 @@ export default function Messages() {
     return () => clearTimeout(timeoutId);
   }, [userSearchQuery, profile?.role]);
 
-  const handleStartNewChat = async (user: any) => {
+  const handleStartNewChat = async (targetUser: any) => {
     // Check if conversation already exists
     const existing = conversations.find(c => 
-      c.participants.includes(user.email) && !c.isAiBot
+      c.participants.includes(targetUser.email) && !c.isAiBot
     );
 
     if (existing) {
       setSelectedChat(existing);
     } else {
-      // Create a localized temporary conversation object
-      const convId = [profile!.email, user.email].sort().join('_');
-      const newConv: Omit<Conversation, 'id'> = {
-        participants: [profile!.email, user.email],
-        participantsData: {
-          [profile!.email]: { name: profile!.name || 'Me', role: profile!.role || 'User' },
-          [user.email]: { name: user.name || user.email.split('@')[0], role: user.role || 'User' }
-        },
-        createdAt: serverTimestamp(),
-        lastMessageTimestamp: serverTimestamp()
+      const convId = [profile!.email, targetUser.email].sort().join('_');
+      const participantsData = {
+        [profile!.email]: { name: profile!.name || 'Me', role: profile!.role || 'User' },
+        [targetUser.email]: { name: targetUser.name || targetUser.email.split('@')[0], role: targetUser.role || 'User' }
       };
 
       try {
-        // We setDoc with merge to avoid overwriting if it exists but wasn't in state
-        await setDoc(doc(db, 'conversations', convId), newConv, { merge: true });
-        setSelectedChat({ id: convId, ...newConv } as Conversation);
+        const { error } = await supabase
+          .from('conversations')
+          .upsert({
+            id: convId,
+            participants: [profile!.email, targetUser.email],
+            participants_data: participantsData,
+            last_message_timestamp: new Date().toISOString()
+          }, { onConflict: 'id' });
+        
+        if (error) throw error;
+        setSelectedChat({ id: convId, participants: [profile!.email, targetUser.email], participantsData, createdAt: new Date().toISOString() } as Conversation);
       } catch (error) {
-        handleFirestoreError(error, OperationType.WRITE, 'conversations');
+        console.error('Error creating conversation:', error);
       }
     }
     setShowNewChatModal(false);
@@ -191,38 +194,39 @@ export default function Messages() {
   const startAiBotChat = async () => {
     if (!profile?.email) return;
     
-    // Check if AI Bot conversation exists
     const existing = conversations.find(c => c.isAiBot);
     
     if (existing) {
       setSelectedChat(existing);
     } else {
       const convId = `ai_bot_${profile.email}`;
-      const newConv: Omit<Conversation, 'id'> = {
-        participants: [profile.email, aiBotParticipant.email],
-        participantsData: {
-          [profile.email]: { name: profile.name || 'Me', role: profile.role || 'User' },
-          [aiBotParticipant.email]: { name: aiBotParticipant.name, role: aiBotParticipant.role }
-        },
-        isAiBot: true,
-        createdAt: serverTimestamp(),
-        lastMessageTimestamp: serverTimestamp(),
-        lastMessage: "Hello! I'm your Health AI Bot. How can I help you today?"
+      const welcomeMsg = "Hello! I'm your Health AI Bot. How can I help you today?";
+      const participantsData = {
+        [profile.email]: { name: profile.name || 'Me', role: profile.role || 'User' },
+        [aiBotParticipant.email]: { name: aiBotParticipant.name, role: aiBotParticipant.role }
       };
 
       try {
-        await setDoc(doc(db, 'conversations', convId), newConv);
-        // Add welcome message
-        await addDoc(collection(db, 'conversations', convId, 'messages'), {
-          text: newConv.lastMessage,
-          senderEmail: aiBotParticipant.email,
-          senderName: aiBotParticipant.name,
-          timestamp: serverTimestamp(),
-          isAiGenerated: true
+        await supabase.from('conversations').upsert({
+          id: convId,
+          participants: [profile.email, aiBotParticipant.email],
+          participants_data: participantsData,
+          is_ai_bot: true,
+          last_message: welcomeMsg,
+          last_message_timestamp: new Date().toISOString()
+        }, { onConflict: 'id' });
+
+        await supabase.from('messages').insert({
+          conversation_id: convId,
+          text: welcomeMsg,
+          sender_email: aiBotParticipant.email,
+          sender_name: aiBotParticipant.name,
+          is_ai_generated: true
         });
-        setSelectedChat({ id: convId, ...newConv } as Conversation);
+
+        setSelectedChat({ id: convId, participants: [profile.email, aiBotParticipant.email], participantsData, isAiBot: true, lastMessage: welcomeMsg, createdAt: new Date().toISOString() } as Conversation);
       } catch (error) {
-        handleFirestoreError(error, OperationType.WRITE, 'conversations');
+        console.error('Error creating AI bot chat:', error);
       }
     }
     setShowNewChatModal(false);
@@ -236,10 +240,13 @@ export default function Messages() {
         setSelectedChat(existing);
       } else {
         const fetchUser = async () => {
-          const q = query(collection(db, 'users'), where('email', '==', targetEmail), limit(1));
-          const snap = await getDocs(q);
-          if (!snap.empty) {
-            handleStartNewChat(snap.docs[0].data());
+          const { data } = await supabase
+            .from('users')
+            .select('*')
+            .eq('email', targetEmail)
+            .limit(1);
+          if (data && data.length > 0) {
+            handleStartNewChat(data[0]);
           }
         };
         fetchUser();
@@ -254,26 +261,42 @@ export default function Messages() {
       return;
     }
 
-    const q = query(
-      collection(db, 'conversations', selectedChat.id, 'messages'),
-      orderBy('timestamp', 'asc')
-    );
+    const fetchMessages = async () => {
+      try {
+        const { data, error } = await supabase
+          .from('messages')
+          .select('*')
+          .eq('conversation_id', selectedChat.id)
+          .order('created_at', { ascending: true });
+        
+        if (error) throw error;
+        setMessages((data || []).map((d: any) => ({
+          id: d.id,
+          senderEmail: d.sender_email,
+          senderName: d.sender_name,
+          text: d.text,
+          timestamp: d.created_at,
+          readBy: d.read_by || {},
+          isAiGenerated: d.is_ai_generated || false
+        })));
+        setTimeout(() => {
+          scrollRef.current?.scrollIntoView({ behavior: 'smooth' });
+        }, 100);
+      } catch (err) {
+        console.error('Error fetching messages:', err);
+      }
+    };
 
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      const msgs = snapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data()
-      })) as Message[];
-      
-      setMessages(msgs);
-      setTimeout(() => {
-        scrollRef.current?.scrollIntoView({ behavior: 'smooth' });
-      }, 100);
-    }, (error) => {
-      handleFirestoreError(error, OperationType.LIST, `conversations/${selectedChat.id}/messages`);
-    });
+    fetchMessages();
 
-    return () => unsubscribe();
+    const channel = supabase
+      .channel(`messages-${selectedChat.id}`)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'messages', filter: `conversation_id=eq.${selectedChat.id}` }, () => {
+        fetchMessages();
+      })
+      .subscribe();
+
+    return () => { supabase.removeChannel(channel); };
   }, [profile?.email, selectedChat?.id]);
 
   // Listen for other user's status
@@ -286,24 +309,31 @@ export default function Messages() {
     const otherEmail = selectedChat.participants.find(e => e !== profile?.email);
     if (!otherEmail) return;
 
-    const q = query(collection(db, 'users'), where('email', '==', otherEmail), limit(1));
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      if (!snapshot.empty) {
-        const data = snapshot.docs[0].data();
-        setOtherUserStatus({
-          isOnline: data.isOnline || false,
-          lastSeen: data.lastSeen,
-          typingTo: data.typingTo || null
-        });
+    const fetchStatus = async () => {
+      try {
+        const { data } = await supabase
+          .from('users')
+          .select('is_online, last_seen, typing_to')
+          .eq('email', otherEmail)
+          .single();
+        if (data) {
+          setOtherUserStatus({
+            isOnline: data.is_online || false,
+            lastSeen: data.last_seen,
+            typingTo: data.typing_to || null
+          });
+        }
+      } catch (err) {
+        console.error('Error fetching user status:', err);
       }
-    }, (error) => {
-      handleFirestoreError(error, OperationType.GET, `users/${otherEmail}`);
-    });
+    };
 
-    return () => unsubscribe();
+    fetchStatus();
+    const interval = setInterval(fetchStatus, 5000);
+    return () => clearInterval(interval);
   }, [selectedChat?.id, profile?.email]);
 
-  // Mark messages as read and update read receipts
+  // Mark messages as read
   useEffect(() => {
     if (!profile?.email || !selectedChat || messages.length === 0) return;
 
@@ -312,15 +342,20 @@ export default function Messages() {
     );
 
     if (unreadMessages.length > 0) {
-      unreadMessages.forEach(async (msg) => {
-        try {
-          await updateDoc(doc(db, 'conversations', selectedChat.id, 'messages', msg.id), {
-            [`readBy.${profile.email!.replace(/\./g, '_')}`]: serverTimestamp()
-          });
-        } catch (error) {
-          console.error("Error marking message as read:", error);
+      const markAsRead = async () => {
+        for (const msg of unreadMessages) {
+          try {
+            const updatedReadBy = { ...msg.readBy, [profile.email!]: new Date().toISOString() };
+            await supabase
+              .from('messages')
+              .update({ read_by: updatedReadBy })
+              .eq('id', msg.id);
+          } catch (error) {
+            console.error('Error marking message as read:', error);
+          }
         }
-      });
+      };
+      markAsRead();
     }
   }, [messages, profile?.email, selectedChat?.id]);
 
@@ -334,38 +369,31 @@ export default function Messages() {
     
     // Clear typing status
     try {
-      await updateDoc(doc(db, 'conversations', selectedChat.id), {
-        [`typing.${profile.email.replace(/\./g, '_')}`]: deleteField()
-      });
+      const currentTyping = selectedChat.typing || {};
+      const emailKey = profile.email.replace(/\./g, '_');
+      const { [emailKey]: _, ...rest } = currentTyping;
+      await supabase.from('conversations').update({ typing: rest }).eq('id', selectedChat.id);
     } catch (e) {}
 
     try {
       // Add message
-      const msgRef = await addDoc(collection(db, 'conversations', selectedChat.id, 'messages'), {
-        senderEmail: profile.email,
-        senderName: profile.name || profile.email.split('@')[0],
+      await supabase.from('messages').insert({
+        conversation_id: selectedChat.id,
+        sender_email: profile.email,
+        sender_name: profile.name || profile.email.split('@')[0],
         text: textPayload,
-        timestamp: serverTimestamp(),
-        readBy: {
-          [profile.email.replace(/\./g, '_')]: serverTimestamp()
-        }
+        read_by: { [profile.email]: new Date().toISOString() }
       });
 
       // Update conversation
-      await updateDoc(doc(db, 'conversations', selectedChat.id), {
-        lastMessage: textPayload,
-        lastMessageTimestamp: serverTimestamp()
-      });
+      await supabase.from('conversations').update({
+        last_message: textPayload,
+        last_message_timestamp: new Date().toISOString()
+      }).eq('id', selectedChat.id);
 
       // AI Bot Logic
       if (selectedChat.isAiBot) {
         setIsAiTyping(true);
-        // Show bot as typing in the DB
-        try {
-          await updateDoc(doc(db, 'conversations', selectedChat.id), {
-            [`typing.${aiBotParticipant.email.replace(/\./g, '_')}`]: serverTimestamp()
-          });
-        } catch (e) {}
 
         const history = messages.slice(-10).map(m => ({
           role: m.senderEmail === aiBotParticipant.email ? 'model' : 'user' as any,
@@ -375,29 +403,26 @@ export default function Messages() {
         const aiResponse = await getAiResponse(textPayload, history);
         
         // Add AI message
-        await addDoc(collection(db, 'conversations', selectedChat.id, 'messages'), {
+        await supabase.from('messages').insert({
+          conversation_id: selectedChat.id,
           text: aiResponse,
-          senderEmail: aiBotParticipant.email,
-          senderName: aiBotParticipant.name,
-          timestamp: serverTimestamp(),
-          isAiGenerated: true,
-          readBy: {
-            [aiBotParticipant.email.replace(/\./g, '_')]: serverTimestamp(),
-            [profile.email.replace(/\./g, '_')]: serverTimestamp() // Mark as read by me instantly since I'm here
-          }
+          sender_email: aiBotParticipant.email,
+          sender_name: aiBotParticipant.name,
+          is_ai_generated: true,
+          read_by: { [aiBotParticipant.email]: new Date().toISOString(), [profile.email]: new Date().toISOString() }
         });
 
         // Update conversation with AI response
-        await updateDoc(doc(db, 'conversations', selectedChat.id), {
-          lastMessage: aiResponse.slice(0, 50) + (aiResponse.length > 50 ? '...' : ''),
-          lastMessageTimestamp: serverTimestamp(),
-          [`typing.${aiBotParticipant.email.replace(/\./g, '_')}`]: deleteField()
-        });
+        await supabase.from('conversations').update({
+          last_message: aiResponse.slice(0, 50) + (aiResponse.length > 50 ? '...' : ''),
+          last_message_timestamp: new Date().toISOString(),
+          typing: {}
+        }).eq('id', selectedChat.id);
         
         setIsAiTyping(false);
       }
     } catch (error) {
-      handleFirestoreError(error, OperationType.WRITE, `conversations/${selectedChat.id}/messages`);
+      console.error('Error sending message:', error);
     } finally {
       setSending(false);
     }
@@ -411,18 +436,20 @@ export default function Messages() {
     const updateTypingStatus = async (isTyping: boolean) => {
       try {
         const emailKey = profile.email!.replace(/\./g, '_');
-        // Update both the conversation and the user document
-        const promises = [
-          updateDoc(doc(db, 'conversations', selectedChat.id), {
-            [`typing.${emailKey}`]: isTyping ? serverTimestamp() : deleteField()
-          }),
-          updateDoc(doc(db, 'users', user!.uid), {
-            typingTo: isTyping ? (selectedChat.isAiBot ? 'vitalis_ai' : targetEmail || selectedChat.participants.find(p => p !== profile.email)) : null
-          })
-        ];
-        await Promise.all(promises);
+        const currentTyping = selectedChat.typing || {};
+        let newTyping: any;
+        if (isTyping) {
+          newTyping = { ...currentTyping, [emailKey]: new Date().toISOString() };
+        } else {
+          const { [emailKey]: _, ...rest } = currentTyping;
+          newTyping = rest;
+        }
+        await Promise.all([
+          supabase.from('conversations').update({ typing: newTyping }).eq('id', selectedChat.id),
+          supabase.from('users').update({ typing_to: isTyping ? (selectedChat.isAiBot ? 'vitalis_ai' : targetEmail || selectedChat.participants.find(p => p !== profile.email)) : null }).eq('email', profile.email)
+        ]);
       } catch (error) {
-        console.error("Error updating typing status:", error);
+        console.error('Error updating typing status:', error);
       }
     };
 

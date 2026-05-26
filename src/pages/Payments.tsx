@@ -20,18 +20,7 @@ import {
   ShieldCheck
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
-import { 
-  collection, 
-  query, 
-  where, 
-  onSnapshot, 
-  addDoc, 
-  serverTimestamp, 
-  orderBy,
-  updateDoc,
-  doc
-} from 'firebase/firestore';
-import { db } from '../firebase';
+import { supabase } from '../supabase';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 
@@ -62,33 +51,45 @@ export default function Payments() {
   useEffect(() => {
     if (!user || !profile) return;
 
-    let q;
-    if (profile.role === 'Admin') {
-      q = query(
-        collection(db, 'payments'),
-        orderBy('timestamp', 'desc')
-      );
-    } else {
-      q = query(
-        collection(db, 'payments'),
-        where('patientEmail', '==', user.email),
-        orderBy('timestamp', 'desc')
-      );
-    }
+    const fetchPayments = async () => {
+      try {
+        let query = supabase.from('payments').select('*');
+        
+        if (profile.role !== 'Admin') {
+          query = query.eq('patient_email', user.email);
+        }
+        
+        const { data, error } = await query.order('created_at', { ascending: false });
+        
+        if (error) throw error;
+        setPayments((data || []).map((d: any) => ({
+          id: d.id,
+          patientEmail: d.patient_email,
+          patientName: d.patient_name,
+          amount: d.amount,
+          currency: d.currency,
+          status: d.status,
+          description: d.description,
+          method: d.method,
+          timestamp: d.created_at
+        })));
+      } catch (err) {
+        console.error('Error fetching payments:', err);
+      } finally {
+        setLoading(false);
+      }
+    };
 
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      const docs = snapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data()
-      })) as Payment[];
-      setPayments(docs);
-      setLoading(false);
-    }, (error) => {
-      console.error("Error fetching payments:", error);
-      setLoading(false);
-    });
+    fetchPayments();
 
-    return () => unsubscribe();
+    const channel = supabase
+      .channel('payments-realtime')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'payments' }, () => {
+        fetchPayments();
+      })
+      .subscribe();
+
+    return () => { supabase.removeChannel(channel); };
   }, [user, profile]);
 
   const filteredPayments = payments.filter(p => {
@@ -232,7 +233,7 @@ export default function Payments() {
                     <td className="px-8 py-5">
                       <div className="flex items-center gap-2 text-sm text-slate-600 font-medium">
                         <Calendar className="w-4 h-4 text-slate-400" />
-                        {payment.timestamp?.toDate ? payment.timestamp.toDate().toLocaleDateString() : 'Recent'}
+                        {payment.timestamp ? new Date(payment.timestamp).toLocaleDateString() : 'Recent'}
                       </div>
                     </td>
                     <td className="px-8 py-5">
@@ -303,11 +304,10 @@ function PaymentModal({ payment, onClose }: { payment: Payment, onClose: () => v
     await new Promise(resolve => setTimeout(resolve, 2000));
     
     try {
-      const paymentRef = doc(db, 'payments', payment.id);
-      await updateDoc(paymentRef, {
-        status: 'completed',
-        method: 'Visa •••• 4242'
-      });
+      await supabase
+        .from('payments')
+        .update({ status: 'completed', method: 'Visa •••• 4242' })
+        .eq('id', payment.id);
       setSuccess(true);
       setTimeout(() => onClose(), 1500);
     } catch (error) {
@@ -414,15 +414,14 @@ function CreatePaymentModal({ onClose }: { onClose: () => void }) {
 
     setIsSaving(true);
     try {
-      await addDoc(collection(db, 'payments'), {
-        patientEmail: user.email,
-        patientName: profile.name || user.displayName || 'Patient',
+      await supabase.from('payments').insert({
+        patient_email: user.email,
+        patient_name: profile.name || user.displayName || 'Patient',
         amount: parseFloat(formData.amount),
         currency: 'USD',
         status: 'completed',
         description: formData.description,
-        method: formData.method,
-        timestamp: serverTimestamp()
+        method: formData.method
       });
       setSuccess(true);
       setTimeout(() => onClose(), 1500);

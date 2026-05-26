@@ -26,8 +26,7 @@ import {
   BookOpen
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
-import { doc, updateDoc } from 'firebase/firestore';
-import { db, auth } from '../firebase';
+import { supabase } from '../supabase';
 import { getProfileExplanation, ProfileExplanation } from '../services/explanationService';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
@@ -36,11 +35,6 @@ function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
-import { 
-  updatePassword, 
-  reauthenticateWithCredential, 
-  EmailAuthProvider 
-} from 'firebase/auth';
 import { AnimatePresence } from 'motion/react';
 
 export default function Profile() {
@@ -97,8 +91,10 @@ export default function Profile() {
     setFormData(prev => ({ ...prev, newsletter: newValue }));
     
     try {
-      const userRef = doc(db, 'users', user.uid);
-      await updateDoc(userRef, { newsletter: newValue });
+      await supabase
+        .from('users')
+        .update({ newsletter: newValue })
+        .eq('email', user.email);
     } catch (error) {
       console.error('Error updating newsletter status:', error);
       // Revert local state if DB update fails
@@ -112,23 +108,33 @@ export default function Profile() {
 
     setIsSaving(true);
     try {
-      const userRef = doc(db, 'users', user.uid);
-      const { serverTimestamp: serverTs } = await import('firebase/firestore');
       const updateData: any = {
-        ...formData,
+        name: formData.name,
         age: formData.age ? parseInt(formData.age) : null,
+        gender: formData.gender,
+        blood_group: formData.bloodGroup,
+        allergies: formData.allergies,
+        medical_history: formData.medicalHistory,
+        newsletter: formData.newsletter,
+        specialty: formData.specialty,
+        bio: formData.bio,
+        location: formData.location,
         experience: formData.experience ? parseInt(formData.experience) : null,
-        photoURL: formData.image,
-        updatedAt: serverTs()
+        image: formData.image,
+        photo_url: formData.image,
+        updated_at: new Date().toISOString()
       };
       
       // Only include role if it's actually changed and user has permission
-      // The firestore rules will enforce this anyway
-      if (formData.role === profile?.role) {
-        delete updateData.role;
+      if (formData.role !== profile?.role) {
+        updateData.role = formData.role;
       }
 
-      await updateDoc(userRef, updateData);
+      await supabase
+        .from('users')
+        .update(updateData)
+        .eq('email', user.email);
+
       setSaveSuccess(true);
       setIsEditing(false);
       
@@ -655,24 +661,33 @@ function ChangePasswordModal({ onClose }: { onClose: () => void }) {
 
     setIsLoading(true);
     try {
-      const user = auth.currentUser;
-      if (!user || !user.email) throw new Error("No user logged in");
+      // Supabase: verify current password by signing in
+      const { data: { session } } = await supabase.auth.getSession();
+      const userEmail = session?.user?.email;
+      if (!userEmail) throw new Error('No user logged in');
 
-      const credential = EmailAuthProvider.credential(user.email, currentPassword);
-      await reauthenticateWithCredential(user, credential);
-      await updatePassword(user, newPassword);
+      // Re-authenticate with current password
+      const { error: signInErr } = await supabase.auth.signInWithPassword({
+        email: userEmail,
+        password: currentPassword
+      });
+      if (signInErr) {
+        setError('Current password is incorrect');
+        setIsLoading(false);
+        return;
+      }
+
+      // Update to new password
+      const { error: updateErr } = await supabase.auth.updateUser({
+        password: newPassword
+      });
+      if (updateErr) throw updateErr;
       
       setSuccess(true);
       setTimeout(() => onClose(), 2000);
     } catch (err: any) {
       console.error(err);
-      if (err.code === 'auth/wrong-password') {
-        setError("Current password is incorrect");
-      } else if (err.code === 'auth/requires-recent-login') {
-        setError("Please log out and log back in to change your password");
-      } else {
-        setError(err.message || "Failed to update password. Note: This feature requires an email/password account.");
-      }
+      setError(err.message || 'Failed to update password.');
     } finally {
       setIsLoading(false);
     }

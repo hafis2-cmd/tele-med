@@ -1,6 +1,5 @@
 import React, { useEffect } from 'react';
-import { collection, query, where, getDocs, updateDoc, doc, addDoc } from 'firebase/firestore';
-import { db } from '../firebase';
+import { supabase } from '../supabase';
 
 export function parseAppointmentDateTime(dateStr: string, timeStr: string): Date {
   try {
@@ -37,20 +36,24 @@ export default function ReminderService() {
       try {
         const now = new Date();
         
-        // Fetch booked appointments
-        const apptsQuery = query(
-          collection(db, 'appointments'),
-          where('status', '==', 'booked')
-        );
-        
-        const snapshot = await getDocs(apptsQuery);
-        const appointments = snapshot.docs.map(d => ({ id: d.id, ...d.data() as any }));
+        // Fetch booked appointments using Supabase
+        const { data: appointments, error } = await supabase
+          .from('appointments')
+          .select('*')
+          .eq('status', 'booked');
+
+        if (error) {
+          console.error("Error fetching appointments in ReminderService:", error);
+          return;
+        }
+
+        if (!appointments) return;
 
         for (const app of appointments) {
           // Skip if already sent
-          if (app.reminder1hSent) continue;
+          if (app.reminder_1h_sent) continue;
 
-          const appointmentTime = parseAppointmentDateTime(app.date, app.time);
+          const appointmentTime = parseAppointmentDateTime(app.appointment_date, app.appointment_time);
           const diffMs = appointmentTime.getTime() - now.getTime();
           const diffHours = diffMs / (1000 * 60 * 60);
 
@@ -59,29 +62,28 @@ export default function ReminderService() {
             console.log(`Sending 1-hour automated reminders for appointment: ${app.id}`);
 
             // 1. Send warning/reminder to patient
-            await addDoc(collection(db, 'notifications'), {
-              recipientEmail: app.patientEmail,
-              message: `Reminder: Your upcoming telehealth consultation with Dr. ${app.doctorName} starts in approximately 1 hour at ${app.time}. Please prepare and join the queue.`,
-              type: 'appointment_reminder',
-              appointmentId: app.id,
-              timestamp: new Date(),
-              sentVia: ['System', 'Dashboard']
+            await supabase.from('notifications').insert({
+              recipient_email: app.patient_email,
+              message: `Reminder: Your upcoming telehealth consultation with Dr. ${app.doctor_name} starts in approximately 1 hour at ${app.appointment_time}. Please prepare and join the queue.`,
+              notification_type: 'appointment_reminder',
+              appointment_id: app.id,
+              sent_via: ['System', 'Dashboard']
             });
 
             // 2. Send warning/reminder to doctor
-            await addDoc(collection(db, 'notifications'), {
-              recipientEmail: app.doctorEmail,
-              message: `Reminder: You have an upcoming consultation with patient ${app.patientName} starting in approximately 1 hour at ${app.time}.`,
-              type: 'appointment_reminder',
-              appointmentId: app.id,
-              timestamp: new Date(),
-              sentVia: ['System', 'Dashboard']
+            await supabase.from('notifications').insert({
+              recipient_email: app.doctor_email,
+              message: `Reminder: You have an upcoming consultation with patient ${app.patient_name || 'Patient'} starting in approximately 1 hour at ${app.appointment_time}.`,
+              notification_type: 'appointment_reminder',
+              appointment_id: app.id,
+              sent_via: ['System', 'Dashboard']
             });
 
             // 3. Mark as sent on the appointment document
-            await updateDoc(doc(db, 'appointments', app.id), {
-              reminder1hSent: true
-            });
+            await supabase
+              .from('appointments')
+              .update({ reminder_1h_sent: true })
+              .eq('id', app.id);
           }
         }
       } catch (error) {

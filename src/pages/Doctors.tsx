@@ -21,8 +21,7 @@ import {
   CheckCircle2,
   Video
 } from 'lucide-react';
-import { collection, query, where, onSnapshot } from 'firebase/firestore';
-import { db, handleFirestoreError, OperationType } from '../firebase';
+import { supabase } from '../supabase';
 import { useNavigate } from 'react-router-dom';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
@@ -59,26 +58,32 @@ export default function Doctors() {
   const [filter, setFilter] = useState('All');
 
   useEffect(() => {
-    const q = query(collection(db, 'users'), where('role', '==', 'Doctor'));
-    
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      const docs = snapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data()
-      })) as DoctorProfile[];
-      setDoctors(docs);
-      setLoading(false);
-    }, (error) => {
-      console.error("Error fetching doctors:", error);
+    const fetchDoctors = async () => {
       try {
-        handleFirestoreError(error, OperationType.LIST, 'users');
-      } catch (e) {
-        // Log it but don't crash the effect
+        const { data, error } = await supabase
+          .from('users')
+          .select('*')
+          .eq('role', 'Doctor');
+        
+        if (error) throw error;
+        setDoctors((data || []).map((d: any) => ({ id: d.id, ...d })));
+      } catch (err) {
+        console.error("Error fetching doctors:", err);
+      } finally {
+        setLoading(false);
       }
-      setLoading(false);
-    });
+    };
 
-    return () => unsubscribe();
+    fetchDoctors();
+
+    const channel = supabase
+      .channel('doctors-realtime')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'users', filter: 'role=eq.Doctor' }, () => {
+        fetchDoctors();
+      })
+      .subscribe();
+
+    return () => { supabase.removeChannel(channel); };
   }, []);
 
   const filteredDoctors = doctors.filter(doc => {
@@ -246,7 +251,7 @@ export default function Doctors() {
                           </div>
                         ) : selectedDoctor.lastSeen && (
                           <div className="px-3 py-1 bg-slate-100 text-slate-500 rounded-full text-[10px] font-black uppercase tracking-wider">
-                            Last seen: {new Date(selectedDoctor.lastSeen.toDate()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                            Last seen: {new Date(selectedDoctor.lastSeen).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                           </div>
                         )}
                         <ShieldCheck className="w-8 h-8 text-emerald-500" />

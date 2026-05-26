@@ -30,19 +30,7 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { useConfirmation } from '../context/ConfirmationContext';
-import { 
-  collection, 
-  query, 
-  where, 
-  onSnapshot, 
-  getDocs,
-  orderBy,
-  deleteDoc,
-  doc,
-  addDoc,
-  serverTimestamp
-} from 'firebase/firestore';
-import { db, handleFirestoreError, OperationType } from '../firebase';
+import { supabase } from '../supabase';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 
@@ -54,13 +42,7 @@ function formatLastSeen(lastSeen: any): string | null {
   if (!lastSeen) return null;
   try {
     let date: Date;
-    if (typeof lastSeen.toDate === 'function') {
-      date = lastSeen.toDate();
-    } else if (lastSeen.seconds) {
-      date = new Date(lastSeen.seconds * 1000);
-    } else {
-      date = new Date(lastSeen);
-    }
+    date = new Date(lastSeen);
     
     if (isNaN(date.getTime())) return null;
     
@@ -135,18 +117,19 @@ export default function Patients() {
 
     const fetchStats = async () => {
       try {
-        const q = query(
-          collection(db, 'diagnoses'),
-          where('patientEmail', '==', expandedPatientEmail),
-          orderBy('timestamp', 'desc')
-        );
-        const snapshot = await getDocs(q);
-        const docsData = snapshot.docs.map(doc => doc.data());
+        const { data, error } = await supabase
+          .from('diagnoses')
+          .select('*')
+          .eq('patient_email', expandedPatientEmail)
+          .order('created_at', { ascending: false });
+        
+        if (error) throw error;
+        const docsData = data || [];
         
         if (docsData.length > 0) {
-          const totalRisk = docsData.reduce((acc, curr: any) => acc + (curr.risk || 0), 0);
+          const totalRisk = docsData.reduce((acc: number, curr: any) => acc + (curr.risk || 0), 0);
           const avgRisk = Math.round(totalRisk / docsData.length);
-          const latest = docsData[0] as any;
+          const latest = docsData[0];
           
           const featureAlerts: string[] = [];
           docsData.forEach((d: any) => {
@@ -166,7 +149,7 @@ export default function Patients() {
               avgRisk,
               count: docsData.length,
               latestCondition: latest.condition || 'General wellness review',
-              latestDate: latest.timestamp ? new Date(latest.timestamp.toDate()).toLocaleDateString() : 'N/A',
+              latestDate: latest.created_at ? new Date(latest.created_at).toLocaleDateString() : 'N/A',
               featureAlerts: featureAlerts.slice(0, 3),
               loading: false
             }
@@ -185,7 +168,7 @@ export default function Patients() {
           }));
         }
       } catch (err) {
-        console.error("Error fetching patient summary stats:", err);
+        console.error('Error fetching patient summary stats:', err);
         setExpandedPatientStats(prev => ({
           ...prev,
           [expandedPatientEmail]: {
@@ -205,11 +188,11 @@ export default function Patients() {
 
   const handleDeleteDiagnosis = async (id: string) => {
     try {
-      await deleteDoc(doc(db, 'diagnoses', id));
+      await supabase.from('diagnoses').delete().eq('id', id);
       // update state locally so it disappears instantly from the modal
       setPatientHistory(prev => prev.filter(item => item.id !== id));
     } catch (error) {
-      handleFirestoreError(error, OperationType.DELETE, `diagnoses/${id}`);
+      console.error('Error deleting diagnosis:', error);
     }
   };
 
@@ -218,70 +201,85 @@ export default function Patients() {
   useEffect(() => {
     if (!profile?.email || profile.role !== 'Doctor') return;
 
-    // Fetch appointments to find patients
-    const q = query(
-      collection(db, 'appointments'),
-      where('doctorEmail', '==', profile.email)
-    );
+    const fetchAppointments = async () => {
+      try {
+        const { data, error } = await supabase
+          .from('appointments')
+          .select('*')
+          .eq('doctor_email', profile.email);
+        
+        if (error) throw error;
+        const pMap = new Map<string, any>();
 
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      const appointments = snapshot.docs.map(doc => doc.data());
-      const pMap = new Map<string, any>();
-
-      appointments.forEach((app: any) => {
-        if (!pMap.has(app.patientEmail)) {
-          pMap.set(app.patientEmail, {
-            email: app.patientEmail,
-            name: (app.patientEmail || 'Patient').split('@')[0], // Fallback name
-            lastAppointment: app.date,
-            totalAppointments: 1,
-            diagnosesCount: 0,
-            isOnline: false
-          });
-        } else {
-          const existing = pMap.get(app.patientEmail);
-          existing.totalAppointments += 1;
-          if (new Date(app.date) > new Date(existing.lastAppointment)) {
-            existing.lastAppointment = app.date;
+        (data || []).forEach((app: any) => {
+          const patientEmail = app.patient_email;
+          if (!pMap.has(patientEmail)) {
+            pMap.set(patientEmail, {
+              email: patientEmail,
+              name: (patientEmail || 'Patient').split('@')[0],
+              lastAppointment: app.date,
+              totalAppointments: 1,
+              diagnosesCount: 0,
+              isOnline: false
+            });
+          } else {
+            const existing = pMap.get(patientEmail);
+            existing.totalAppointments += 1;
+            if (new Date(app.date) > new Date(existing.lastAppointment)) {
+              existing.lastAppointment = app.date;
+            }
           }
-        }
-      });
-      
-      setPatientDataMap(pMap);
-      setLoading(false);
-    }, (error) => {
-      handleFirestoreError(error, OperationType.LIST, 'appointments');
-      setLoading(false);
-    });
+        });
+        
+        setPatientDataMap(pMap);
+      } catch (err) {
+        console.error('Error fetching appointments:', err);
+      } finally {
+        setLoading(false);
+      }
+    };
 
-    return () => unsubscribe();
+    fetchAppointments();
+
+    const channel = supabase
+      .channel('patients-appointments-realtime')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'appointments' }, () => {
+        fetchAppointments();
+      })
+      .subscribe();
+
+    return () => { supabase.removeChannel(channel); };
   }, [profile]);
 
-  // Listen to patient profiles in real-time
+  // Listen to patient profiles
   useEffect(() => {
     const patientEmails = Array.from(patientDataMap.keys());
     if (patientEmails.length === 0) return;
 
-    // Chunking if more than 30 for Firestore in query (Firestore limit is 30 for IN queries now)
-    // For simplicity, we'll just handle the first 30
-    const limitedEmails = patientEmails.slice(0, 30);
-    const q = query(collection(db, 'users'), where('email', 'in', limitedEmails));
-    
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      const updatedMap = new Map(patientDataMap);
-      snapshot.docs.forEach(doc => {
-        const userData = doc.data();
-        if (updatedMap.has(userData.email)) {
-          const p = updatedMap.get(userData.email);
-          p.name = userData.name || (userData.email || 'Patient').split('@')[0];
-          p.isOnline = userData.isOnline || false;
-          p.lastSeen = userData.lastSeen;
-        }
-      });
-      setPatients(Array.from(updatedMap.values()));
-    });
+    const fetchPatientProfiles = async () => {
+      try {
+        const { data, error } = await supabase
+          .from('users')
+          .select('*')
+          .in('email', patientEmails.slice(0, 100));
+        
+        if (error) throw error;
+        const updatedMap = new Map(patientDataMap);
+        (data || []).forEach((userData: any) => {
+          if (updatedMap.has(userData.email)) {
+            const p = updatedMap.get(userData.email);
+            p.name = userData.name || (userData.email || 'Patient').split('@')[0];
+            p.isOnline = userData.is_online || false;
+            p.lastSeen = userData.last_seen;
+          }
+        });
+        setPatients(Array.from(updatedMap.values()));
+      } catch (err) {
+        console.error('Error fetching patient profiles:', err);
+      }
+    };
 
-    return () => unsubscribe();
+    fetchPatientProfiles();
   }, [patientDataMap]);
 
   useEffect(() => {
@@ -293,15 +291,28 @@ export default function Patients() {
     const fetchHistory = async () => {
       setHistoryLoading(true);
       try {
-        const q = query(
-          collection(db, 'diagnoses'),
-          where('patientEmail', '==', selectedPatient.email),
-          orderBy('timestamp', 'desc')
-        );
-        const snapshot = await getDocs(q);
-        setPatientHistory(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+        const { data, error } = await supabase
+          .from('diagnoses')
+          .select('*')
+          .eq('patient_email', selectedPatient.email)
+          .order('created_at', { ascending: false });
+        
+        if (error) throw error;
+        setPatientHistory((data || []).map((d: any) => ({
+          id: d.id,
+          patientEmail: d.patient_email,
+          patientName: d.patient_name,
+          doctorEmail: d.doctor_email,
+          condition: d.condition,
+          risk: d.risk,
+          explanation: d.explanation,
+          recommendations: d.recommendations,
+          feature_importance: d.feature_importance,
+          timestamp: d.created_at,
+          ...d
+        })));
       } catch (error) {
-        console.error("Error fetching patient history:", error);
+        console.error('Error fetching patient history:', error);
       } finally {
         setHistoryLoading(false);
       }
@@ -803,25 +814,40 @@ function SecureRecordShareModal({
   useEffect(() => {
     async function loadData() {
       try {
-        // Query diagnoses
-        const qDiag = query(
-          collection(db, 'diagnoses'),
-          where('patientEmail', '==', patient.email),
-          orderBy('timestamp', 'desc')
-        );
-        const snapDiag = await getDocs(qDiag);
-        const docsDiag = snapDiag.docs.map(d => ({ id: d.id, ...d.data() }));
+        // Query diagnoses from Supabase
+        const { data: dataDiag, error: errDiag } = await supabase
+          .from('diagnoses')
+          .select('*')
+          .eq('patient_email', patient.email)
+          .order('created_at', { ascending: false });
+
+        if (errDiag) throw errDiag;
+
+        // Map to Firestore format locally to ensure compatibility with child logic
+        const docsDiag = (dataDiag || []).map((d: any) => ({
+          id: d.id,
+          condition: d.condition,
+          risk: d.risk,
+          explanation: d.explanation,
+          recommendations: d.recommendations || [],
+          timestamp: { toDate: () => new Date(d.created_at) }
+        }));
+
         setDiagnoses(docsDiag);
         if (docsDiag.length > 0) {
           setSelectedDiagnosisId(docsDiag[0].id);
         }
 
-        // Query doctors
-        const qDoc = query(collection(db, 'users'), where('role', '==', 'Doctor'));
-        const snapDoc = await getDocs(qDoc);
-        const docsDoc = snapDoc.docs.map(d => ({ id: d.id, ...d.data() }));
+        // Query doctors from Supabase
+        const { data: dataDoc, error: errDoc } = await supabase
+          .from('users')
+          .select('*')
+          .eq('role', 'Doctor');
+
+        if (errDoc) throw errDoc;
+
         // Filter out current logged-in doctor
-        const otherDocs = docsDoc.filter((d: any) => d.email !== profile?.email);
+        const otherDocs = (dataDoc || []).filter((d: any) => d.email !== profile?.email);
         setDoctorsList(otherDocs);
       } catch (err) {
         console.error("Error loading share modal data:", err);
@@ -857,21 +883,27 @@ function SecureRecordShareModal({
       }
 
       const shareDocData = {
-        patientEmail: patient.email,
-        patientName: patient.name,
-        doctorEmail: selectedPhysicianEmail || null,
+        patient_email: patient.email,
+        patient_name: patient.name,
+        doctor_email: selectedPhysicianEmail || null,
         condition: selectedDiag.condition || "Potential Condition Detected",
         risk: selectedDiag.risk || 85,
         explanation: selectedDiag.explanation || "No explanation provided.",
         recommendations: selectedDiag.recommendations || [],
-        expiresAt: expiresAt,
-        createdAt: now
+        expires_at: expiresAt.toISOString(),
+        created_at: now.toISOString()
       };
 
-      // Add to shared_diagnoses collection
-      const docRef = await addDoc(collection(db, 'shared_diagnoses'), shareDocData);
+      // Add to shared_diagnoses table in Supabase
+      const { data: insertedData, error: insertErr } = await supabase
+        .from('shared_diagnoses')
+        .insert([shareDocData])
+        .select()
+        .single();
+
+      if (insertErr) throw insertErr;
       
-      const shareUrl = `${window.location.origin}/shared-diagnosis/${docRef.id}`;
+      const shareUrl = `${window.location.origin}/shared-diagnosis/${insertedData.id}`;
       setGeneratedShareLink(shareUrl);
     } catch (err: any) {
       console.error("Error storing shared diagnosis:", err);

@@ -2,8 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Phone, PhoneOff, User, Video } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
-import { db, handleFirestoreError, OperationType } from '../firebase';
-import { collection, query, where, limit, onSnapshot, doc, updateDoc } from 'firebase/firestore';
+import { supabase } from '../supabase';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
@@ -21,25 +20,59 @@ export default function CallNotification() {
   useEffect(() => {
     if (!profile?.email || location.pathname === '/consultation') return;
 
-    const q = query(
-      collection(db, 'calls'),
-      where('receiverEmail', '==', profile.email),
-      where('status', '==', 'calling'),
-      limit(1)
-    );
+    const fetchActiveCall = async () => {
+      try {
+        const { data, error } = await supabase
+          .from('calls')
+          .select('*')
+          .eq('receiver_email', profile.email)
+          .eq('status', 'calling')
+          .limit(1)
+          .maybeSingle();
 
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      if (!snapshot.empty) {
-        const callData = snapshot.docs[0].data();
-        setIncomingCall({ id: snapshot.docs[0].id, ...callData });
-      } else {
-        setIncomingCall(null);
+        if (error) {
+          console.error("Error fetching active call:", error);
+          return;
+        }
+
+        if (data) {
+          setIncomingCall({
+            id: data.id,
+            callerEmail: data.caller_email,
+            callerName: data.caller_name,
+            receiverEmail: data.receiver_email,
+            receiverName: data.receiver_name,
+            status: data.status,
+          });
+        } else {
+          setIncomingCall(null);
+        }
+      } catch (err) {
+        console.error("Exception fetching call status:", err);
       }
-    }, (error) => {
-      handleFirestoreError(error, OperationType.LIST, 'calls');
-    });
+    };
 
-    return () => unsubscribe();
+    fetchActiveCall();
+
+    const channel = supabase
+      .channel(`calls-notification-${profile.email}`)
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'calls',
+          filter: `receiver_email=eq.${profile.email}`
+        },
+        () => {
+          fetchActiveCall();
+        }
+      )
+      .subscribe();
+
+    return () => {
+      channel.unsubscribe();
+    };
   }, [profile?.email, location.pathname]);
 
   const handleAccept = () => {
@@ -51,8 +84,14 @@ export default function CallNotification() {
 
   const handleDecline = async () => {
     if (incomingCall) {
-      const callDoc = doc(db, 'calls', incomingCall.id);
-      await updateDoc(callDoc, { status: 'ended' });
+      try {
+        await supabase
+          .from('calls')
+          .update({ status: 'ended' })
+          .eq('id', incomingCall.id);
+      } catch (err) {
+        console.error("Error declining call:", err);
+      }
       setIncomingCall(null);
     }
   };

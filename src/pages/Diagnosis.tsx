@@ -38,8 +38,7 @@ function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
-import { collection, addDoc, serverTimestamp, getDocs, query, where } from 'firebase/firestore';
-import { db, handleFirestoreError, OperationType } from '../firebase';
+import { supabase } from '../supabase';
 import { useAuth } from '../context/AuthContext';
 import { DISEASE_CATEGORIES } from '../constants';
 
@@ -79,10 +78,13 @@ export default function Diagnosis() {
   useEffect(() => {
     async function loadDoctorsList() {
       try {
-        const q = query(collection(db, 'users'), where('role', '==', 'Doctor'));
-        const snap = await getDocs(q);
-        const docs = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-        setDoctorsList(docs);
+        const { data, error } = await supabase
+          .from('users')
+          .select('*')
+          .eq('role', 'Doctor');
+        
+        if (error) throw error;
+        setDoctorsList(data || []);
       } catch (err) {
         console.error("Error loading doctors:", err);
       }
@@ -113,35 +115,41 @@ export default function Diagnosis() {
       const patientName = targetPatient ? targetPatient.name : (profile?.name || (profile?.email ? profile.email.split('@')[0] : 'Patient'));
 
       const shareDocData = {
-        patientEmail,
-        patientName,
-        doctorEmail: selectedPhysicianEmail || null,
+        patient_email: patientEmail,
+        patient_name: patientName,
+        doctor_email: selectedPhysicianEmail || null,
         condition: result.condition || "Potential Condition Detected",
         risk: result.confidence_score || 85,
         explanation: result.explanation || "No explanation provided.",
         recommendations: result.recommendations || [],
-        expiresAt: expiresAt,
-        createdAt: now
+        expires_at: expiresAt.toISOString()
       };
 
-      // Add to shared_diagnoses collection
-      const docRef = await addDoc(collection(db, 'shared_diagnoses'), shareDocData);
+      // Add to shared_diagnoses table
+      const { data: shareRow, error: shareErr } = await supabase
+        .from('shared_diagnoses')
+        .insert(shareDocData)
+        .select('id')
+        .single();
+
+      if (shareErr || !shareRow) throw shareErr || new Error("Failed to register share link.");
 
       // Also push to standard diagnoses collection so the doctor can view it in their history directly
       try {
-        await addDoc(collection(db, 'diagnoses'), {
-          patientEmail,
-          condition: result.condition || "Potential Condition Detected",
-          risk: result.confidence_score || 85,
-          explanation: result.explanation || "No explanation provided.",
-          timestamp: serverTimestamp(),
-          feature_importance: result.feature_importance || []
-        });
+        await supabase
+          .from('diagnoses')
+          .insert({
+            patient_email: patientEmail,
+            condition: result.condition || "Potential Condition Detected",
+            risk: result.confidence_score || 85,
+            explanation: result.explanation || "No explanation provided.",
+            feature_importance: result.feature_importance || []
+          });
       } catch (diagErr) {
         console.warn("Could not write duplicate to diagnoses collection:", diagErr);
       }
       
-      const shareUrl = `${window.location.origin}/shared-diagnosis/${docRef.id}`;
+      const shareUrl = `${window.location.origin}/shared-diagnosis/${shareRow.id}`;
       setGeneratedShareLink(shareUrl);
     } catch (err: any) {
       console.error("Error storing shared diagnosis:", err);
@@ -586,16 +594,17 @@ export default function Diagnosis() {
 
       if (profile || targetPatient) {
         try {
-          await addDoc(collection(db, 'diagnoses'), {
-            patientEmail: targetPatient ? targetPatient.email : (profile?.email || 'anonymous@telemed.ai'),
-            condition: data.condition,
-            risk: data.confidence_score,
-            explanation: data.explanation,
-            feature_importance: data.feature_importance || [],
-            timestamp: serverTimestamp()
-          });
+          await supabase
+            .from('diagnoses')
+            .insert({
+              patient_email: targetPatient ? targetPatient.email : (profile?.email || 'anonymous@telemed.ai'),
+              condition: data.condition,
+              risk: data.confidence_score,
+              explanation: data.explanation,
+              feature_importance: data.feature_importance || []
+            });
         } catch (err) {
-          handleFirestoreError(err, OperationType.CREATE, 'diagnoses');
+          console.error("Error logging diagnosis:", err);
         }
       }
       
@@ -637,19 +646,20 @@ export default function Diagnosis() {
       const data = await analyzeSymptoms(symptoms, base64 || undefined, disease, testValuesStr, []);
       setResult(data);
 
-      // Save to Firestore
+      // Save to diagnoses in Supabase
       if (profile || targetPatient) {
         try {
-          await addDoc(collection(db, 'diagnoses'), {
-            patientEmail: targetPatient ? targetPatient.email : (profile?.email || 'anonymous@telemed.ai'),
-            condition: data.condition,
-            risk: data.confidence_score,
-            explanation: data.explanation,
-            feature_importance: data.feature_importance || [],
-            timestamp: serverTimestamp()
-          });
+          await supabase
+            .from('diagnoses')
+            .insert({
+              patient_email: targetPatient ? targetPatient.email : (profile?.email || 'anonymous@telemed.ai'),
+              condition: data.condition,
+              risk: data.confidence_score,
+              explanation: data.explanation,
+              feature_importance: data.feature_importance || []
+            });
         } catch (err) {
-          handleFirestoreError(err, OperationType.CREATE, 'diagnoses');
+          console.error("Error saving diagnosis:", err);
         }
       }
     } catch (error) {
