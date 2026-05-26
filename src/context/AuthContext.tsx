@@ -48,16 +48,30 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [googleToken, setGoogleToken] = useState<string | null>(null);
 
   useEffect(() => {
+    // Safety net: force loading off if it hangs (e.g. offline or restricted network)
+    const safetyTimeout = setTimeout(() => {
+      console.warn("Auth initialization timed out. Forcing loading off.");
+      setLoading(false);
+    }, 3000);
+
     // Check active session on mount
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setUser(session?.user ?? null);
-      if (session?.user) {
-        fetchProfile(session.user.id);
-      } else {
+    supabase.auth.getSession()
+      .then(({ data: { session } }) => {
+        clearTimeout(safetyTimeout);
+        setUser(session?.user ?? null);
+        if (session?.user) {
+          fetchProfile(session.user.id);
+        } else {
+          setProfile(null);
+          setLoading(false);
+        }
+      })
+      .catch((err) => {
+        clearTimeout(safetyTimeout);
+        console.error("Session fetch failed:", err);
         setProfile(null);
         setLoading(false);
-      }
-    });
+      });
 
     // Listen for auth state changes
     const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
@@ -73,6 +87,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     });
 
     return () => {
+      clearTimeout(safetyTimeout);
       subscription.unsubscribe();
     };
   }, []);
